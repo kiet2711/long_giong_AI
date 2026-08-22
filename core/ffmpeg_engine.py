@@ -98,15 +98,23 @@ class FFmpegDubbingEngine:
     def __init__(
         self,
         tts_client: Optional[CapCutTTSClient] = None,
-        min_ratio: float = 0.90,
-        max_ratio: float = 1.15,
+        max_audio_speed: float = 1.15,
+        min_video_speed: float = 0.50,
+        min_ratio: Optional[float] = None,
+        max_ratio: Optional[float] = None,
         orig_volume: float = 0.15,
         dub_volume: float = 1.20,
         num_workers: int = 4,
     ):
         self.tts_client = tts_client or CapCutTTSClient()
-        self.min_ratio = min_ratio
-        self.max_ratio = max_ratio
+        # Support both max_audio_speed and legacy min_ratio
+        if min_ratio is not None and max_audio_speed == 1.15:
+            self.max_audio_speed = round(1.0 / max(0.1, min_ratio), 2)
+        else:
+            self.max_audio_speed = max_audio_speed
+        self.min_video_speed = min_video_speed
+        self.min_ratio = round(1.0 / max(0.1, self.max_audio_speed), 3)
+        self.max_ratio = 1.0
         self.orig_volume = orig_volume
         self.dub_volume = dub_volume
         self.num_workers = num_workers
@@ -125,7 +133,7 @@ class FFmpegDubbingEngine:
         Execute the full 6-step native dubbing pipeline:
         1. Parse video metadata & build continuous timeline segments (dubbing + gaps).
         2. Generate AI TTS audio for all dubbed subtitles in parallel.
-        3. Measure audio durations, calculate ratio, and assign sync mode (rubberband vs setpts).
+        3. Measure audio durations, compare with user-defined audio & video speed limits.
         4. Encode segments in parallel via FFmpeg.
         5. Concat demux all segments into final MP4 video.
         """
@@ -184,28 +192,48 @@ class FFmpegDubbingEngine:
             seg.audio_path = str(audio_file)
             seg.audio_duration_sec = round(aud_dur, 3)
 
-            # Calculate ratio: Video Segment Duration / AI Audio Duration
-            ratio = seg.duration_sec / max(0.01, aud_dur)
-            seg.ratio = round(ratio, 3)
-
-            # Assign Sync Mode:
-            # - ratio >= 1.0: AI voice is shorter/equal -> Keep 100% pristine voice 1.0x (never slow down) & video 1.0x
-            # - min_ratio <= ratio < 1.0: AI voice is slightly longer -> Speed up voice only (tempo > 1.0)
-            # - ratio < min_ratio: AI voice is much longer -> Slow down video (setpts), keep pristine voice 1.0x
-            if ratio >= 1.0:
+            # Assign Sync Mode based on Audio & Video Speed limits:
+            if aud_dur <= seg.duration_sec:
+                # 1. AI voice finishes within video segment duration -> 100% natural 1.0x voice & video
+                seg.ratio = round(seg.duration_sec / max(0.01, aud_dur), 2)
                 seg.sync_mode = "passthrough"
-            elif ratio >= self.min_ratio:
-                seg.sync_mode = "rubberband"
+                seg.speed_applied = 1.0
+                seg.video_speed_applied = 1.0
+                seg.sync_desc = "Chuẩn 1.0x (Khớp)"
             else:
-                seg.sync_mode = "setpts"
+                # 2. AI voice is longer than video segment duration
+                needed_speed = round(aud_dur / max(0.01, seg.duration_sec), 2)
+                seg.ratio = round(seg.duration_sec / max(0.01, aud_dur), 2)
+
+                if needed_speed <= self.max_audio_speed:
+                    # Fits within allowed audio speedup limit (e.g. <= 1.15x)
+                    seg.sync_mode = "rubberband"
+                    seg.speed_applied = needed_speed
+                    seg.video_speed_applied = 1.0
+                    seg.sync_desc = f"Tăng giọng {needed_speed:.2f}x (Video 1.0x)"
+                else:
+                    # Exceeds max audio speed -> Slow down video
+                    needed_v_speed = round(seg.duration_sec / max(0.01, aud_dur), 2)
+                    v_speed = max(self.min_video_speed, needed_v_speed)
+                    seg.sync_mode = "setpts"
+                    seg.speed_applied = 1.0
+                    seg.video_speed_applied = v_speed
+                    seg.sync_desc = f"Chậm video {v_speed:.2f}x (Giọng 1.0x)"
 
             completed_tts += 1
             pct = 10.0 + (completed_tts / max(1, total_dubs)) * 35.0
             report(
                 pct,
                 "tts",
-                f"Đã tạo {completed_tts}/{total_dubs} audio: \"{seg.text_dub[:25]}...\" (Ratio: {seg.ratio:.2f}x)",
-                {"seg_id": seg.seg_id, "ratio": seg.ratio, "sync_mode": seg.sync_mode},
+                f"Đã tạo {completed_tts}/{total_dubs} audio: \"{seg.text_dub[:25]}...\" ({seg.sync_desc})",
+                {
+                    "seg_id": seg.seg_id,
+                    "ratio": seg.ratio,
+                    "sync_mode": seg.sync_mode,
+                    "speed_applied": seg.speed_applied,
+                    "video_speed_applied": seg.video_speed_applied,
+                    "sync_desc": seg.sync_desc,
+                },
             )
             return seg
 
@@ -386,8 +414,8 @@ class FFmpegDubbingEngine:
                     ] + v_common + a_common + [str(output_path)]
 
             elif seg.sync_mode == "rubberband":
-                # min_ratio <= ratio < 1.0: AI voice is slightly longer -> Speed up AI voice only (tempo > 1.0), keep video 1.0x
-                tempo = max(1.0, min(2.0, 1.0 / ratio))
+                # Speed up AI voice within allowed limit (tempo > 1.0), keep video 1.0x
+                tempo = max(1.0, min(2.0, seg.speed_applied or (1.0 / ratio)))
 
                 if has_orig_audio:
                     filter_complex = (
@@ -419,11 +447,12 @@ class FFmpegDubbingEngine:
                     ] + v_common + a_common + [str(output_path)]
 
             else:
-                # ratio < min_ratio: AI voice is much longer -> Slow down video (setpts), keep pristine AI voice 1.0x
-                setpts_factor = 1.0 / ratio
+                # Exceeds max audio speed -> Slow down video (setpts), keep pristine AI voice 1.0x
+                v_speed = seg.video_speed_applied or ratio
+                setpts_factor = 1.0 / max(0.1, v_speed)
 
                 if has_orig_audio:
-                    bg_tempo = max(0.5, min(2.0, ratio))
+                    bg_tempo = max(0.25, min(4.0, v_speed))
                     filter_complex = (
                         f"[0:v]setpts={setpts_factor:.4f}*PTS[vout]; "
                         f"[0:a]volume={self.orig_volume:.4f},rubberband=tempo={bg_tempo:.4f}[bga]; "
@@ -475,7 +504,7 @@ class FFmpegDubbingEngine:
         """Fallback filter using built-in atempo if rubberband has library issues."""
         has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
         ratio = seg.ratio or 1.0
-        tempo = max(1.0, min(2.0, 1.0 / ratio)) if seg.sync_mode == "rubberband" else 1.0
+        tempo = max(1.0, min(2.0, seg.speed_applied or (1.0 / ratio))) if seg.sync_mode == "rubberband" else 1.0
         audio_p = Path(seg.audio_path)
 
         v_common = [

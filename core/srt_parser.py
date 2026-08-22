@@ -78,6 +78,9 @@ class TimelineSegment:
     audio_duration_sec: Optional[float] = None
     ratio: Optional[float] = None  # duration_sec / audio_duration_sec
     sync_mode: Optional[str] = None  # 'rubberband', 'setpts', 'passthrough'
+    speed_applied: Optional[float] = 1.0
+    video_speed_applied: Optional[float] = 1.0
+    sync_desc: Optional[str] = ""
     output_segment_path: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
