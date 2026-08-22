@@ -95,6 +95,13 @@ const el = {
   btnRetryAllFailed: document.getElementById('btnRetryAllFailed'),
   btnSkipFailedAndRender: document.getElementById('btnSkipFailedAndRender'),
 
+  // Live Render HUD
+  renderStatsHud: document.getElementById('renderStatsHud'),
+  hudFrames: document.getElementById('hudFrames'),
+  hudFps: document.getElementById('hudFps'),
+  hudTime: document.getElementById('hudTime'),
+  hudSlices: document.getElementById('hudSlices'),
+
   // Cache & Projects
   cacheStatsBadge: document.getElementById('cacheStatsBadge'),
   cacheAlertBanner: document.getElementById('cacheAlertBanner'),
@@ -984,6 +991,25 @@ function handleJobUpdate(msg) {
       lastLoggedMessage = msg.message;
       appendLog(`[${(msg.stage || msg.status || 'INFO').toUpperCase()}] ${msg.message}`);
     }
+  }
+
+  // Live update HUD in Video Render Stage
+  if (msg.stage === 'video_render' && msg.data) {
+    if (el.renderStatsHud) el.renderStatsHud.style.display = 'flex';
+    if (el.hudFrames && msg.data.frame) {
+      el.hudFrames.textContent = parseInt(msg.data.frame, 10).toLocaleString();
+    }
+    if (el.hudFps && msg.data.fps) {
+      el.hudFps.textContent = `${msg.data.fps} fps`;
+    }
+    if (el.hudTime && msg.data.cur_sec !== undefined && msg.data.total_sec !== undefined) {
+      el.hudTime.textContent = `${fmtTime(msg.data.cur_sec)} / ${fmtTime(msg.data.total_sec)}`;
+    }
+    if (el.hudSlices && msg.data.total_slices) {
+      el.hudSlices.textContent = `${msg.data.total_slices.toLocaleString()} dải`;
+    }
+  } else if (msg.stage === 'completed' || msg.status === 'completed') {
+    if (el.renderStatsHud) el.renderStatsHud.style.display = 'none';
   }
 
   // Live update speed badge in table

@@ -324,6 +324,14 @@
       
       <div class="status-msg" id="statusMsg">Đang chuẩn bị các tiến trình FFmpeg...</div>
       
+      <!-- LIVE RENDER STATS HUD -->
+      <div class="render-stats-hud" id="renderStatsHud" style="display: none;">
+        <div class="stat-pill"><span class="stat-label">Khung hình:</span> <b id="hudFrames">0</b></div>
+        <div class="stat-pill"><span class="stat-label">Tốc độ:</span> <b id="hudFps">0 fps</b></div>
+        <div class="stat-pill"><span class="stat-label">Thời gian:</span> <b id="hudTime">00:00 / 00:00</b></div>
+        <div class="stat-pill"><span class="stat-label">Dải video:</span> <b id="hudSlices">0 dải</b></div>
+      </div>
+      
       <div class="log-box" id="logBox"></div>
 
       <!-- FAILED SENTENCES REVIEW & RETRY CONTAINER -->
