@@ -376,6 +376,81 @@ async def download_video(job_id: str):
         )
 
 
+def cleanup_temp_files(max_age_hours: int = 6, clear_all_jobs: bool = False, clear_outputs: bool = False) -> Dict[str, Any]:
+    """Clean up old temporary job folders, preview audio, and temp files."""
+    now = time.time()
+    deleted_count = 0
+    freed_bytes = 0
+
+    if not TEMP_DIR.exists():
+        return {"deleted_count": 0, "freed_mb": 0.0}
+
+    with job_locks:
+        active_job_dirs = [f"job_{jid}" for jid, j in jobs_state.items() if j.get("status") == "running"]
+
+    for item in TEMP_DIR.iterdir():
+        if item.name == "outputs" and not clear_outputs:
+            continue
+        if item.name == "uploads" and not clear_outputs:
+            continue
+
+        try:
+            if item.is_dir():
+                if item.name in active_job_dirs:
+                    continue
+                # If clear_all_jobs is True or folder is older than max_age_hours
+                mtime = item.stat().st_mtime
+                if clear_all_jobs or (now - mtime) > (max_age_hours * 3600):
+                    size = sum(f.stat().st_size for f in item.glob("**/*") if f.is_file())
+                    shutil.rmtree(item, ignore_errors=True)
+                    deleted_count += 1
+                    freed_bytes += size
+            elif item.is_file():
+                # Preview audio or stray mp3/m4a/txt
+                mtime = item.stat().st_mtime
+                if clear_all_jobs or (now - mtime) > (max_age_hours * 3600):
+                    freed_bytes += item.stat().st_size
+                    item.unlink(missing_ok=True)
+                    deleted_count += 1
+        except Exception:
+            pass
+
+    return {
+        "deleted_count": deleted_count,
+        "freed_mb": round(freed_bytes / (1024 * 1024), 2),
+    }
+
+
+def _background_cleanup_worker():
+    """Periodic background daemon that cleans old temp files every 2 hours."""
+    while True:
+        try:
+            time.sleep(7200)  # Every 2 hours
+            cleanup_temp_files(max_age_hours=6)
+        except Exception:
+            pass
+
+
+@app.on_event("startup")
+async def on_startup():
+    """Run initial cleanup on server launch and start periodic worker."""
+    cleanup_temp_files(max_age_hours=6)
+    t = threading.Thread(target=_background_cleanup_worker, daemon=True)
+    t.start()
+
+
+@app.post("/api/cleanup")
+async def api_cleanup(clear_outputs: bool = False):
+    """Manually clear temporary job folders and cache."""
+    res = cleanup_temp_files(max_age_hours=0, clear_all_jobs=True, clear_outputs=clear_outputs)
+    return {
+        "success": True,
+        "deleted_count": res["deleted_count"],
+        "freed_mb": res["freed_mb"],
+        "message": f"Đã dọn dẹp {res['deleted_count']} mục tạm, giải phóng {res['freed_mb']} MB bộ nhớ!",
+    }
+
+
 @app.websocket("/ws/progress/{job_id}")
 async def ws_progress(websocket: WebSocket, job_id: str):
     """WebSocket endpoint to push live progress."""
