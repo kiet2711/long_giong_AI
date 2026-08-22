@@ -628,125 +628,62 @@ class FFmpegDubbingEngine:
                 raise RuntimeError(f"Fast Stream Copy Mux failed: {res.stderr.strip() or 'Unknown error'}")
 
         else:
-            # === INTELLIGENT TIMELINE SLICE ENCODING (CAPCUT-STYLE) ===
-            # 1. Coalesce adjacent segments with identical speed into contiguous slices
+            # === INTELLIGENT TIMELINE COALESCED SINGLE-PASS GPU ENCODING ===
             total_slices = len(video_slices)
             target_fps = 30.0 if video_meta.fps <= 0 else min(60.0, video_meta.fps)
             enc_name, v_encoder_params = get_best_video_encoder_params(target_fps)
 
-            report(80.0, "video_render", f"Gộp {total_segs} đoạn thành {total_slices} phân đoạn video liên tục. Bắt đầu render GPU ({enc_name})...")
+            report(80.0, "video_render", f"Gộp {total_segs} đoạn thành {total_slices} dải video liền mạch. Bắt đầu render GPU ({enc_name})...")
 
-            slice_ts_dir = work_p / "video_slices"
-            slice_ts_dir.mkdir(parents=True, exist_ok=True)
-            slice_files: List[Path] = [slice_ts_dir / f"v_slice_{s.slice_id:04d}.ts" for s in video_slices]
-            completed_slices = 0
-
-            def encode_slice_task(v_slice: VideoSlice) -> Path:
-                nonlocal completed_slices
-                slice_out = slice_ts_dir / f"v_slice_{v_slice.slice_id:04d}.ts"
-
+            # Build in-graph filter script for the coalesced slices (only ~20-50 branches, 100% frame-accurate sync!)
+            filter_lines = []
+            concat_tags = []
+            for i, v_slice in enumerate(video_slices):
                 pts_factor = 1.0 / max(0.1, v_slice.speed)
-                is_speed_1 = abs(pts_factor - 1.0) < 0.001
-
-                if is_speed_1:
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", f"{v_slice.start_sec:.3f}",
-                        "-to", f"{v_slice.end_sec:.3f}",
-                        "-i", str(video_p),
-                        "-an",
-                    ] + v_encoder_params + [
-                        "-f", "mpegts",
-                        str(slice_out),
-                    ]
+                if abs(pts_factor - 1.0) < 0.001:
+                    filter_lines.append(f"[0:v]trim=start={v_slice.start_sec:.3f}:end={v_slice.end_sec:.3f},setpts=PTS-STARTPTS[v{i}];")
                 else:
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", f"{v_slice.start_sec:.3f}",
-                        "-to", f"{v_slice.end_sec:.3f}",
-                        "-i", str(video_p),
-                        "-vf", f"setpts={pts_factor:.4f}*(PTS-STARTPTS)",
-                        "-an",
-                    ] + v_encoder_params + [
-                        "-f", "mpegts",
-                        str(slice_out),
-                    ]
+                    filter_lines.append(f"[0:v]trim=start={v_slice.start_sec:.3f}:end={v_slice.end_sec:.3f},setpts={pts_factor:.4f}*(PTS-STARTPTS)[v{i}];")
+                concat_tags.append(f"[v{i}]")
 
-                is_gpu = "nvenc" in enc_name
-                if is_gpu:
-                    with _GPU_SEMAPHORE:
-                        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-                else:
-                    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+            filter_lines.append(f"{''.join(concat_tags)}concat=n={len(video_slices)}:v=1:a=0[vout]")
+            video_filter_script = work_p / "video_filter_complex.txt"
+            video_filter_script.write_text("\n".join(filter_lines), encoding="utf-8")
 
-                if res.returncode != 0:
-                    # Fallback CPU ultrafast for this slice if GPU failed
-                    cpu_params = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22", "-pix_fmt", "yuv420p", "-r", str(target_fps)]
-                    if is_speed_1:
-                        fallback_cmd = [
-                            "ffmpeg", "-y",
-                            "-ss", f"{v_slice.start_sec:.3f}",
-                            "-to", f"{v_slice.end_sec:.3f}",
-                            "-i", str(video_p),
-                            "-an",
-                        ] + cpu_params + ["-f", "mpegts", str(slice_out)]
-                    else:
-                        fallback_cmd = [
-                            "ffmpeg", "-y",
-                            "-ss", f"{v_slice.start_sec:.3f}",
-                            "-to", f"{v_slice.end_sec:.3f}",
-                            "-i", str(video_p),
-                            "-vf", f"setpts={pts_factor:.4f}*(PTS-STARTPTS)",
-                            "-an",
-                        ] + cpu_params + ["-f", "mpegts", str(slice_out)]
-                    fb_res = subprocess.run(fallback_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-                    if fb_res.returncode != 0:
-                        raise RuntimeError(f"Failed to encode video slice #{v_slice.slice_id}: {fb_res.stderr.strip()}")
-
-                completed_slices += 1
-                pct = 80.0 + (completed_slices / max(1, total_slices)) * 18.0
-                speed_str = f"{v_slice.speed:.2f}x"
-                report(
-                    pct,
-                    "video_render",
-                    f"Đã render phân đoạn video {completed_slices}/{total_slices} ({v_slice.start_sec:.1f}s - {v_slice.end_sec:.1f}s @ {speed_str})",
-                    {"slice_id": v_slice.slice_id, "speed": v_slice.speed},
-                )
-                return slice_out
-
-            # Encode coalesced video slices in parallel with GPU NVENC (up to 4 GPU streams)
-            max_enc_workers = max(1, min(self.num_workers, 8))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_enc_workers) as executor:
-                futures = [executor.submit(encode_slice_task, s) for s in video_slices]
-                for f in concurrent.futures.as_completed(futures):
-                    f.result()
-
-            # Concat all .ts video slices losslessly and mux with full dubbed audio track
-            report(98.0, "concat_video", "Đang ghép nối toàn bộ phân đoạn video và hoàn thiện file MP4...")
-            concat_slices_list = work_p / "concat_slices_list.txt"
-            with open(concat_slices_list, "w", encoding="utf-8") as f:
-                for sf in slice_files:
-                    if sf.exists():
-                        safe_path = Path(sf).resolve().as_posix()
-                        f.write(f"file '{safe_path}'\n")
-
-            final_mux_cmd = [
+            single_pass_cmd = [
                 "ffmpeg", "-y",
-                "-f", "concat",
-                "-safe", "0",
-                "-i", str(concat_slices_list),
+                "-i", str(video_p),
                 "-i", str(full_audio_path),
-                "-map", "0:v:0",
+                "-filter_complex_script", str(video_filter_script),
+                "-map", "[vout]",
                 "-map", "1:a:0",
-                "-c:v", "copy",
+            ] + v_encoder_params + [
                 "-c:a", "aac",
                 "-b:a", "192k",
                 "-movflags", "+faststart",
                 str(out_p),
             ]
-            res = subprocess.run(final_mux_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+
+            res = subprocess.run(single_pass_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
             if res.returncode != 0:
-                raise RuntimeError(f"Failed to concat video slices: {res.stderr.strip() or 'Unknown error'}")
+                report(85.0, "video_render", "GPU bận, chuyển sang chế độ CPU Ultrafast Single-Pass...")
+                cpu_v_params = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22", "-pix_fmt", "yuv420p", "-r", str(target_fps)]
+                cpu_cmd = [
+                    "ffmpeg", "-y",
+                    "-i", str(video_p),
+                    "-i", str(full_audio_path),
+                    "-filter_complex_script", str(video_filter_script),
+                    "-map", "[vout]",
+                    "-map", "1:a:0",
+                ] + cpu_v_params + [
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-movflags", "+faststart",
+                    str(out_p),
+                ]
+                cpu_res = subprocess.run(cpu_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+                if cpu_res.returncode != 0:
+                    raise RuntimeError(f"Single-Pass Video Render failed: {cpu_res.stderr.strip() or 'Unknown error'}")
 
         # Export synchronized SRT file alongside final MP4
         out_srt_p = out_p.with_suffix(".srt")
@@ -845,7 +782,7 @@ class FFmpegDubbingEngine:
             cmd = [
                 "ffmpeg", "-y",
                 "-ss", f"{v_slice.start_sec:.3f}",
-                "-to", f"{v_slice.end_sec:.3f}",
+                "-t", f"{v_slice.duration_sec:.3f}",
                 "-i", str(video_p),
                 "-vn",
                 "-af", f"volume={self.orig_volume:.4f},aresample=48000:async=1,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}",
@@ -856,7 +793,7 @@ class FFmpegDubbingEngine:
             cmd = [
                 "ffmpeg", "-y",
                 "-ss", f"{v_slice.start_sec:.3f}",
-                "-to", f"{v_slice.end_sec:.3f}",
+                "-t", f"{v_slice.duration_sec:.3f}",
                 "-i", str(video_p),
                 "-vn",
                 "-af", f"volume={self.orig_volume:.4f},rubberband=tempo={tempo:.4f},aresample=48000:async=1,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}",
@@ -868,7 +805,7 @@ class FFmpegDubbingEngine:
             fallback_cmd = [
                 "ffmpeg", "-y",
                 "-ss", f"{v_slice.start_sec:.3f}",
-                "-to", f"{v_slice.end_sec:.3f}",
+                "-t", f"{v_slice.duration_sec:.3f}",
                 "-i", str(video_p),
                 "-vn",
                 "-af", f"volume={self.orig_volume:.4f},atempo={tempo:.4f},aresample=48000:async=1,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}",
