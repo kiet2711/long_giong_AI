@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Dubbing & Video Sync Studio — FFmpeg Native</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="wrap">
+
+  <!-- HEADER -->
+  <header>
+    <div class="eyebrow">
+      <span>AI Dubbing Pipeline</span>
+      <span class="badge">FFmpeg 7.1 Native</span>
+    </div>
+    <h1>Công cụ Lồng tiếng AI & Đồng bộ Video tự động</h1>
+    <div class="sub">Tạo giọng đọc AI từ SRT → Cắt & Khớp tốc độ video/audio → Ghép nối siêu tốc không cần CapCut PC</div>
+  </header>
+
+  <!-- PIPELINE FLOW DIAGRAM -->
+  <section>
+    <h2>Sơ đồ luồng xử lý tự động</h2>
+    <div class="flow">
+      <div class="fstep">
+        <div class="n">01</div>
+        <div class="t">Parse SRT & Video</div>
+        <div class="d">Lấy timestamp, duration từng dòng & khoảng lặng</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="fstep">
+        <div class="n">02</div>
+        <div class="t">Sinh Audio TTS AI</div>
+        <div class="d">CapCut Engine (Tự xoay Device ID chống ban)</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="fstep">
+        <div class="n">03</div>
+        <div class="t">Tính Ratio Lệch</div>
+        <div class="d">Ratio = duration_gốc / duration_lồng_tiếng</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="branch-group">
+        <div class="fstep branch">
+          <div class="n">04a · Lệch ít</div>
+          <div class="t">Giữ nguyên Video</div>
+          <div class="d">Stretch Audio bằng rubberband</div>
+        </div>
+        <div class="fstep branch">
+          <div class="n">04b · Lệch nhiều</div>
+          <div class="t">Đổi Speed Video</div>
+          <div class="d">setpts theo giọng AI sạch 100%</div>
+        </div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="fstep">
+        <div class="n">05</div>
+        <div class="t">Encode Song song</div>
+        <div class="d">Đa luồng FFmpeg siêu tốc (libx264 veryfast)</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="fstep">
+        <div class="n">06</div>
+        <div class="t">Concat Demuxer</div>
+        <div class="d">Ghép -c copy hoàn tất chỉ trong vài giây</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CONTROLS GRID -->
+  <section>
+    <h2>Bảng điều khiển & Cấu hình</h2>
+    <div class="control-grid">
+      
+      <!-- Card 1: Files -->
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="12" y1="18" x2="12" y2="12"></line><line x1="9" y1="15" x2="15" y2="15"></line></svg>
+          1. Tải lên Video & Phụ đề
+        </div>
+        
+        <div class="form-group">
+          <label>File Video gốc (.mp4, .mkv, .mov)</label>
+          <div class="dropzone" id="videoDropzone">
+            <span>Kéo thả hoặc click để chọn Video</span>
+            <input type="file" id="videoInput" accept="video/*">
+            <div class="file-name" id="videoFileName"></div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>File Phụ đề SRT Lồng tiếng (Bắt buộc)</label>
+          <div class="dropzone">
+            <span>Chọn file .srt tiếng Việt</span>
+            <input type="file" id="srtDubInput" accept=".srt">
+            <div class="file-name" id="srtDubFileName"></div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>File Phụ đề Gốc (Tùy chọn - để đối chiếu)</label>
+          <div class="dropzone">
+            <span>Chọn file .srt gốc (Anh/Trung)</span>
+            <input type="file" id="srtOrigInput" accept=".srt">
+            <div class="file-name" id="srtOrigFileName"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Card 2: Voice & TTS -->
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+          2. Giọng đọc AI & Tốc độ
+        </div>
+
+        <div class="form-group">
+          <label>Chọn Giọng đọc (CapCut Voice Catalog)</label>
+          <select id="voiceSelect">
+            <option value="BV421_vivn_streaming">🇻🇳 Nhỏ Ngọt Ngào (BV421_vivn_streaming)</option>
+            <option value="BV074_streaming">🇻🇳 Cô Gái Hoạt Ngôn (BV074_streaming)</option>
+            <option value="vi_female_huong">🇻🇳 Giọng Nữ Phổ Thông (vi_female_huong)</option>
+            <option value="BV074_streaming_dsp">🇻🇳 Giọng Bắc (BV074_streaming_dsp)</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>Tốc độ đọc mặc định (Rate)</label>
+          <select id="voiceRateSelect">
+            <option value="0.9">0.9x (Chậm)</option>
+            <option value="1.0" selected>1.0x (Chuẩn bình thường)</option>
+            <option value="1.1">1.1x (Hơi nhanh)</option>
+            <option value="1.2">1.2x (Nhanh)</option>
+            <option value="1.3">1.3x (Rất nhanh)</option>
+          </select>
+        </div>
+
+        <div class="form-group" style="margin-top: 18px;">
+          <button class="btn btn-block" id="btnPreviewVoice">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+            Nghe thử giọng
+          </button>
+        </div>
+      </div>
+
+      <!-- Card 3: Sync Tuning & Actions -->
+      <div class="card">
+        <div class="card-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+          3. Tinh chỉnh Đồng bộ & Âm lượng
+        </div>
+
+        <div class="row-inputs form-group">
+          <div>
+            <label>Min Ratio (Stretch)</label>
+            <input type="number" id="minRatioInput" step="0.05" value="0.90" min="0.5" max="1.0">
+          </div>
+          <div>
+            <label>Max Ratio (Stretch)</label>
+            <input type="number" id="maxRatioInput" step="0.05" value="1.15" min="1.0" max="2.0">
+          </div>
+        </div>
+
+        <div class="row-inputs form-group">
+          <div>
+            <label>Vol Video Gốc</label>
+            <input type="number" id="origVolInput" step="0.05" value="0.15" min="0.0" max="1.0">
+          </div>
+          <div>
+            <label>Vol Giọng AI</label>
+            <input type="number" id="dubVolInput" step="0.1" value="1.20" min="0.5" max="3.0">
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-top: 10px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <label style="margin-bottom: 0;">Đa luồng xử lý (Threads)</label>
+            <span id="threadsValue" class="badge" style="background: rgba(61, 217, 197, 0.15); color: var(--teal); border: 1px solid rgba(61, 217, 197, 0.3); padding: 1px 8px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 11px;">50 luồng</span>
+          </div>
+          <input type="range" id="threadsSlider" min="1" max="200" value="50" step="1" style="width: 100%; accent-color: var(--teal); cursor: pointer;">
+        </div>
+
+        <div class="form-group" style="margin-top: 14px;">
+          <button class="btn btn-primary btn-block" id="btnStartDubbing">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+            Bắt đầu Lồng tiếng & Render
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- MOCKUP / LIVE PREVIEW APP -->
+  <section>
+    <h2>Giao diện Xem trước & Khớp dòng phụ đề</h2>
+    <div class="app">
+      <div class="app-bar">
+        <div class="app-bar-left">
+          <div class="dot" style="background:#FF5D5D"></div>
+          <div class="dot" style="background:#FFBD44"></div>
+          <div class="dot" style="background:#00CA4E"></div>
+          <div class="app-title">dubbing-sync-studio — live player</div>
+        </div>
+      </div>
+
+      <div class="layout">
+        
+        <!-- VIDEO PANE -->
+        <div class="video-pane">
+          <div class="screen">
+            <video id="mainVideo" playsinline></video>
+            <div class="placeholder" id="videoPlaceholder">
+              <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+              <span>Chưa nạp video (Chọn video ở bảng trên để xem)</span>
+            </div>
+            <div class="caption" id="captionBox" style="display:none;">
+              <span id="captionText"></span>
+            </div>
+          </div>
+
+          <div class="transport">
+            <button class="playbtn" id="playBtn">
+              <svg id="playIcon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            </button>
+            <span class="tc" id="curTimeText">00:00.0</span>
+            <div class="tbar" id="tbar">
+              <div class="fill" id="tbarFill"></div>
+              <div class="knob" id="tbarKnob"></div>
+            </div>
+            <span class="tc" id="totalTimeText">00:18.0</span>
+          </div>
+
+          <div class="track-legend">
+            <div class="lg"><span class="sw" style="background:var(--amber)"></span> Video track</div>
+            <div class="lg"><span class="sw" style="background:var(--teal)"></span> Audio lồng tiếng AI</div>
+          </div>
+
+          <div class="waveform">
+            <div class="lbl">AUDIO — LỒNG TIẾNG</div>
+            <div class="row" id="waveA"></div>
+            <div class="lbl" style="margin-top:8px">VIDEO SPEED MAP</div>
+            <div class="rowv" id="waveV"></div>
+          </div>
+        </div>
+
+        <!-- SRT PANE -->
+        <div class="srt-pane">
+          <div class="srt-head">
+            <span class="lbl" id="srtCountLabel">SRT — 0 DÒNG</span>
+            <span class="lbl" id="rangeIndicator">00:00 – 00:00</span>
+          </div>
+          <div class="srt-list" id="srtList"></div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- MODAL PROGRESS OVERLAY -->
+  <div class="modal-backdrop" id="modalBackdrop">
+    <div class="modal-box">
+      <div class="modal-header">
+        <div class="modal-title" id="modalTitle">Đang xử lý lồng tiếng...</div>
+      </div>
+      
+      <div class="progress-bar-container">
+        <div class="progress-bar-fill" id="progressBarFill"></div>
+      </div>
+      
+      <div class="status-msg" id="statusMsg">Đang chuẩn bị các tiến trình FFmpeg...</div>
+      
+      <div class="log-box" id="logBox"></div>
+
+      <div class="modal-actions">
+        <button class="btn btn-teal" id="btnDownloadResult" style="display: none;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+          Tải Video Thành Phẩm
+        </button>
+        <button class="btn" id="btnModalClose">Đóng Cửa Sổ</button>
+      </div>
+    </div>
+  </div>
+
+  <footer>Công cụ Lồng tiếng & Render Video tự động bằng FFmpeg 7.1 & CapCut AI Voice Engine</footer>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

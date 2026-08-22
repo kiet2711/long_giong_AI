@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Cpus / Virtual environments
+venv/
+.venv/
+env/
+
+# Temp processing folders and media artifacts
+temp/
+*.mp4
+*.mp3
+*.wav
+*.mkv
+!tests/fixtures/*
+
+# IDE and OS files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
