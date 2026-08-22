@@ -1,15 +1,17 @@
 """
 High-performance FFmpeg Dubbing & Sync Engine.
-Handles audio stretching (rubberband), video speed adjusting (setpts),
-parallel segment encoding, and instant concat demuxing.
+Handles audio stretching (rubberband/atempo), video speed adjusting (setpts),
+lightning-fast full-track background audio volume scaling, and instant concat demuxing.
 """
 
 import concurrent.futures
 import json
+import logging
 import os
 import shutil
 import subprocess
 import threading
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -18,6 +20,8 @@ from mutagen.mp3 import MP3
 
 from core.srt_parser import SubtitleItem, TimelineSegment, SRTParser
 from core.tts_client import CapCutTTSClient
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -90,8 +94,20 @@ def get_audio_duration(audio_path: Union[str, Path]) -> float:
         return float(res.stdout.strip())
 
 
+def create_silence_wav(output_path: Union[str, Path], duration_sec: float, sample_rate: int = 48000, channels: int = 2):
+    """Generate exact sample-accurate 16-bit stereo silence WAV file instantly in pure Python (0.0001s)."""
+    num_samples = int(max(0.001, duration_sec) * sample_rate)
+    data = b"\x00" * (num_samples * channels * 2)  # 16-bit PCM = 2 bytes per sample per channel
+    with wave.open(str(output_path), "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(2)  # 16-bit
+        wf.setframerate(sample_rate)
+        wf.writeframes(data)
+
+
 _GPU_ENCODER_PARAMS = None
 _GPU_SEMAPHORE = threading.Semaphore(4)
+
 
 def get_best_video_encoder_params(target_fps: float) -> List[str]:
     """Auto-detect the fastest hardware video encoder (NVIDIA NVENC > libx264 ultrafast)."""
@@ -121,7 +137,7 @@ def get_best_video_encoder_params(target_fps: float) -> List[str]:
 class FFmpegDubbingEngine:
     """
     Main engine to coordinate TTS generation, segment alignment,
-    parallel FFmpeg encoding, and final concatenation.
+    rapid parallel voice rendering, full-track background mixing, and final concatenation.
     """
 
     def __init__(
@@ -155,15 +171,15 @@ class FFmpegDubbingEngine:
         voice: str = "BV421_vivn_streaming",
         voice_rate: str = "1.0",
         progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
+        **kwargs,
     ) -> Dict[str, Any]:
         """
-        Execute the full 6-step native dubbing pipeline:
+        Execute the high-speed dubbing pipeline:
         1. Parse video metadata & build continuous timeline segments (dubbing + gaps).
-        2. Generate AI TTS audio for all dubbed subtitles in parallel.
-        3. Measure audio durations, compare with user-defined audio & video speed limits.
-        4. If no video speed change needed: Smart Lossless Stream Copy (-c:v copy) in ~1s!
-           If video speed change needed: GPU NVENC hardware acceleration.
-        5. Output final dubbed MP4 video.
+        2. Generate AI TTS audio for all dubbed subtitles in parallel (with caching).
+        3. Build AI voice track (instant Python silence for gaps, lightweight audio filters for dubs).
+        4. Lower original background audio for entire track in 1 go & mix tracks.
+        5. Lossless Stream Copy (-c:v copy) or GPU single-pass render for final video.
         """
         video_p = Path(video_path).resolve()
         out_p = Path(output_video_path).resolve()
@@ -355,8 +371,10 @@ class FFmpegDubbingEngine:
 
         seg.text_dub = text_dub.strip()
         if audio_file.exists():
-            try: audio_file.unlink()
-            except Exception: pass
+            try:
+                audio_file.unlink()
+            except Exception:
+                pass
 
         self.tts_client.generate_speech_to_file(
             text=seg.text_dub,
@@ -382,7 +400,10 @@ class FFmpegDubbingEngine:
         video_meta: VideoMetadata,
         progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
-        """Step 3 (Audio Mix) and Step 4 (Video Render) of dubbing pipeline."""
+        """
+        Step 3 (High-Speed Voice Track Render & Full Background Audio Mix)
+        and Step 4 (Video Render & Mux).
+        """
         out_p = Path(output_video_path)
         seg_dir = work_p / "segments"
         seg_dir.mkdir(parents=True, exist_ok=True)
@@ -400,59 +421,99 @@ class FFmpegDubbingEngine:
 
         # Check if video speed modification is needed
         has_video_speed_change = any(abs((s.video_speed_applied or 1.0) - 1.0) > 0.01 for s in timeline_segs)
+        has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
 
         # ---------------------------------------------------------------------
-        # Step 3: Render audio track in parallel across all threads
+        # Step 3.1: Render AI voice segments in parallel
+        # (Instant 0s pure-Python silence for gaps, lightweight MP3 filter for dubs)
         # ---------------------------------------------------------------------
-        report(45.0, "audio_render", f"Đang hòa trộn track âm thanh song song {total_segs} segments...")
+        report(45.0, "audio_render", f"Đang đồng bộ hóa {total_segs} đoạn giọng đọc AI...")
         completed_auds = 0
 
-        def task_render_audio_seg(seg: TimelineSegment) -> str:
+        def task_render_voice_seg(seg: TimelineSegment) -> str:
             nonlocal completed_auds
-            out_aud_path = seg_dir / f"aud_seg_{seg.seg_id:04d}.wav"
+            out_aud_path = seg_dir / f"voice_seg_{seg.seg_id:04d}.wav"
             seg.output_segment_path = str(out_aud_path)
 
-            self._render_single_audio_segment(
-                video_path=video_p,
+            self._render_single_voice_segment(
                 seg=seg,
                 output_path=out_aud_path,
-                video_meta=video_meta,
             )
 
             completed_auds += 1
-            pct = 45.0 + (completed_auds / max(1, total_segs)) * 30.0
-            report(
-                pct,
-                "audio_render",
-                f"Đã xử lý audio segment {completed_auds}/{total_segs} [{seg.seg_type.upper()}] ({seg.sync_desc})",
-                {"seg_id": seg.seg_id, "seg_type": seg.seg_type, "sync_mode": seg.sync_mode},
-            )
+            if completed_auds % 25 == 0 or completed_auds == total_segs:
+                pct = 45.0 + (completed_auds / max(1, total_segs)) * 25.0
+                report(
+                    pct,
+                    "audio_render",
+                    f"Đã chuẩn bị giọng đọc AI {completed_auds}/{total_segs} [{seg.seg_type.upper()}] ({seg.sync_desc})",
+                    {"seg_id": seg.seg_id, "seg_type": seg.seg_type, "sync_mode": seg.sync_mode},
+                )
             return str(out_aud_path)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(self.num_workers, 64))) as executor:
-            futures = [executor.submit(task_render_audio_seg, seg) for seg in timeline_segs]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(self.num_workers, 32))) as executor:
+            futures = [executor.submit(task_render_voice_seg, seg) for seg in timeline_segs]
             for f in concurrent.futures.as_completed(futures):
                 f.result()
 
-        # Concat all audio segments into single full uncompressed audio track (0.000s sample-accurate)
-        report(75.0, "concat_audio", "Đang ghép nối toàn bộ track audio...")
-        concat_list_path = work_p / "concat_audio_list.txt"
+        # Concat all voice segments into full AI voice track
+        report(70.0, "concat_audio", "Đang ghép nối toàn bộ track giọng đọc AI...")
+        concat_list_path = work_p / "concat_voice_list.txt"
         with open(concat_list_path, "w", encoding="utf-8") as f:
             for seg in timeline_segs:
                 if seg.output_segment_path and os.path.exists(seg.output_segment_path):
                     safe_path = seg.output_segment_path.replace("\\", "/")
                     f.write(f"file '{safe_path}'\n")
 
-        full_audio_path = work_p / "full_dubbed_audio.wav"
-        concat_aud_cmd = [
+        full_voice_path = work_p / "full_voice_ai.wav"
+        concat_voice_cmd = [
             "ffmpeg", "-y",
             "-f", "concat",
             "-safe", "0",
             "-i", str(concat_list_path),
             "-c:a", "pcm_s16le",
-            str(full_audio_path),
+            str(full_voice_path),
         ]
-        subprocess.run(concat_aud_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        subprocess.run(concat_voice_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+
+        # ---------------------------------------------------------------------
+        # Step 3.2: Extract background audio track and adjust volume for entire track in 1 go
+        # ---------------------------------------------------------------------
+        full_audio_path = work_p / "full_dubbed_audio.wav"
+
+        if has_orig_audio:
+            vol_pct = int(self.orig_volume * 100)
+            report(75.0, "audio_render", f"Đang hạ âm lượng toàn bộ track âm thanh gốc ({vol_pct}%) và hòa âm...")
+            bg_audio_path = work_p / "full_bg_audio.wav"
+
+            # Extract entire video audio track and lower volume in 1 single command (lightning fast!)
+            extract_bg_cmd = [
+                "ffmpeg", "-y",
+                "-i", str(video_p),
+                "-vn",
+                "-af", f"volume={self.orig_volume:.4f},aresample=48000:async=1",
+                "-c:a", "pcm_s16le",
+                "-ar", "48000",
+                "-ac", "2",
+                str(bg_audio_path),
+            ]
+            subprocess.run(extract_bg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+
+            # Mix lowered background track + AI voice track in 1 single command
+            mix_cmd = [
+                "ffmpeg", "-y",
+                "-i", str(bg_audio_path),
+                "-i", str(full_voice_path),
+                "-filter_complex", "amix=inputs=2:duration=first:dropout_transition=0",
+                "-c:a", "pcm_s16le",
+                "-ar", "48000",
+                "-ac", "2",
+                str(full_audio_path),
+            ]
+            subprocess.run(mix_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        else:
+            # If no original audio or orig_volume == 0, full audio track is directly the full voice track
+            full_audio_path = full_voice_path
 
         # ---------------------------------------------------------------------
         # Step 4: Single-Pass Video Pipeline (Stream Copy OR Single-Pass FilterGraph)
@@ -558,553 +619,60 @@ class FFmpegDubbingEngine:
             "timeline": [s.to_dict() for s in timeline_segs],
         }
 
-    def _render_single_audio_segment(
+    def _render_single_voice_segment(
         self,
-        video_path: Path,
         seg: TimelineSegment,
         output_path: Path,
-        video_meta: VideoMetadata,
     ):
-        """Render audio-only stream for a single segment (sample-accurate uncompressed PCM WAV)."""
-        a_common = [
-            "-c:a", "pcm_s16le",
-            "-ar", "48000",
-            "-ac", "2",
-        ]
-        has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
-        ratio = seg.ratio or 1.0
-
+        """
+        Render voice stream for a single segment (only touches tiny MP3 TTS files,
+        never touches the heavy video file).
+        """
         # Calculate exact target output duration for this segment
         if seg.seg_type == "dub" and seg.sync_mode == "setpts":
-            v_speed = seg.video_speed_applied or ratio
+            v_speed = seg.video_speed_applied or seg.ratio or 1.0
             target_dur = seg.duration_sec / max(0.1, v_speed)
         else:
             target_dur = seg.duration_sec
 
-        if seg.seg_type == "gap":
-            if has_orig_audio:
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-ss", str(seg.start_sec),
-                    "-t", str(seg.duration_sec),
-                    "-i", str(video_path),
-                    "-vn",
-                    "-af", f"volume={self.orig_volume:.4f},aresample=48000,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}",
-                ] + a_common + [str(output_path)]
-            else:
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-f", "lavfi", "-t", str(seg.duration_sec), "-i", "anullsrc=r=48000:cl=stereo",
-                    "-af", f"aresample=48000,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}",
-                ] + a_common + [str(output_path)]
+        # Case 1: Gap or failed/missing TTS audio -> instant pure Python silence WAV (0ms!)
+        if seg.seg_type == "gap" or seg.is_failed or not seg.audio_path or not Path(seg.audio_path).exists():
+            create_silence_wav(output_path, duration_sec=target_dur)
+            return
 
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-            if res.returncode != 0:
-                raise RuntimeError(f"Failed to render audio GAP segment {seg.seg_id}: {res.stderr.strip() or 'Unknown error'}")
-
-        elif seg.seg_type == "dub":
-            if seg.is_failed or not seg.audio_path or not Path(seg.audio_path).exists():
-                # Fallback: keep original background audio / silence if AI audio was skipped
-                if has_orig_audio:
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(seg.start_sec),
-                        "-t", str(seg.duration_sec),
-                        "-i", str(video_path),
-                        "-vn",
-                        "-af", f"volume={self.orig_volume:.4f},aresample=48000,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}",
-                    ] + a_common + [str(output_path)]
-                else:
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-f", "lavfi", "-t", str(seg.duration_sec), "-i", "anullsrc=r=48000:cl=stereo",
-                        "-af", f"aresample=48000,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}",
-                    ] + a_common + [str(output_path)]
-
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-                if res.returncode != 0:
-                    raise RuntimeError(f"Failed to render fallback audio for segment {seg.seg_id}")
-                return
-
-            audio_p = Path(seg.audio_path)
-
-            if seg.sync_mode == "passthrough":
-                if has_orig_audio:
-                    filter_complex = (
-                        f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1,atrim=0:{target_dur:.4f},apad=whole_dur={target_dur:.4f}[bga]; "
-                        f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1,atrim=0:{target_dur:.4f},apad=whole_dur={target_dur:.4f}[duba]; "
-                        f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0,aresample=48000,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}[aout]"
-                    )
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(seg.start_sec),
-                        "-t", str(seg.duration_sec),
-                        "-i", str(video_path),
-                        "-i", str(audio_p),
-                        "-vn",
-                        "-filter_complex", filter_complex,
-                        "-map", "[aout]",
-                    ] + a_common + [str(output_path)]
-                else:
-                    filter_complex = f"[0:a]volume={self.dub_volume:.4f},aresample=48000,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}[aout]"
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-i", str(audio_p),
-                        "-vn",
-                        "-filter_complex", filter_complex,
-                        "-map", "[aout]",
-                    ] + a_common + [str(output_path)]
-
-            elif seg.sync_mode == "rubberband":
-                tempo = max(0.5, min(2.5, seg.speed_applied or 1.0))
-                if has_orig_audio:
-                    filter_complex = (
-                        f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1,atrim=0:{target_dur:.4f},apad=whole_dur={target_dur:.4f}[bga]; "
-                        f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1,atrim=0:{target_dur:.4f},apad=whole_dur={target_dur:.4f}[duba]; "
-                        f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0,aresample=48000,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}[aout]"
-                    )
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(seg.start_sec),
-                        "-t", str(seg.duration_sec),
-                        "-i", str(video_path),
-                        "-i", str(audio_p),
-                        "-vn",
-                        "-filter_complex", filter_complex,
-                        "-map", "[aout]",
-                    ] + a_common + [str(output_path)]
-                else:
-                    filter_complex = f"[0:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}[aout]"
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-i", str(audio_p),
-                        "-vn",
-                        "-filter_complex", filter_complex,
-                        "-map", "[aout]",
-                    ] + a_common + [str(output_path)]
-
-            else:
-                # setpts mode: video is slowed down, so background audio is slowed down to match, voice is 1.0x
-                v_speed = seg.video_speed_applied or ratio
-                bg_tempo = max(0.25, min(4.0, v_speed))
-                if has_orig_audio:
-                    filter_complex = (
-                        f"[0:a]volume={self.orig_volume:.4f},rubberband=tempo={bg_tempo:.4f},aresample=48000:async=1,atrim=0:{target_dur:.4f},apad=whole_dur={target_dur:.4f}[bga]; "
-                        f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1,atrim=0:{target_dur:.4f},apad=whole_dur={target_dur:.4f}[duba]; "
-                        f"[bga][duba]amix=inputs=2:duration=longest:dropout_transition=0,aresample=48000,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}[aout]"
-                    )
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(seg.start_sec),
-                        "-t", str(seg.duration_sec),
-                        "-i", str(video_path),
-                        "-i", str(audio_p),
-                        "-vn",
-                        "-filter_complex", filter_complex,
-                        "-map", "[aout]",
-                    ] + a_common + [str(output_path)]
-                else:
-                    filter_complex = f"[0:a]volume={self.dub_volume:.4f},aresample=48000,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}[aout]"
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-i", str(audio_p),
-                        "-vn",
-                        "-filter_complex", filter_complex,
-                        "-map", "[aout]",
-                    ] + a_common + [str(output_path)]
-
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-            if res.returncode != 0:
-                self._retry_audio_with_atempo(video_path, seg, output_path, video_meta)
-
-    def _retry_audio_with_atempo(
-        self,
-        video_path: Path,
-        seg: TimelineSegment,
-        output_path: Path,
-        video_meta: VideoMetadata,
-    ):
-        """Fallback audio filter using built-in atempo."""
-        has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
-        ratio = seg.ratio or 1.0
-        tempo = max(0.5, min(2.5, seg.speed_applied or 1.0))
+        # Case 2: Dub segment with valid TTS MP3
         audio_p = Path(seg.audio_path)
         a_common = ["-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]
 
-        if seg.seg_type == "dub" and seg.sync_mode == "setpts":
-            v_speed = seg.video_speed_applied or ratio
-            target_dur = seg.duration_sec / max(0.1, v_speed)
-        else:
-            target_dur = seg.duration_sec
-
-        if seg.sync_mode == "setpts":
-            v_speed = seg.video_speed_applied or ratio
-            bg_tempo = max(0.25, min(4.0, v_speed))
-            if has_orig_audio:
-                filter_complex = (
-                    f"[0:a]volume={self.orig_volume:.4f},atempo={bg_tempo:.4f},aresample=48000:async=1,atrim=0:{target_dur:.4f},apad=whole_dur={target_dur:.4f}[bga]; "
-                    f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1,atrim=0:{target_dur:.4f},apad=whole_dur={target_dur:.4f}[duba]; "
-                    f"[bga][duba]amix=inputs=2:duration=longest:dropout_transition=0,aresample=48000,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}[aout]"
-                )
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-ss", str(seg.start_sec),
-                    "-t", str(seg.duration_sec),
-                    "-i", str(video_path),
-                    "-i", str(audio_p),
-                    "-vn",
-                    "-filter_complex", filter_complex,
-                    "-map", "[aout]",
-                ] + a_common + [str(output_path)]
-            else:
-                filter_complex = f"[0:a]volume={self.dub_volume:.4f},aresample=48000,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}[aout]"
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-i", str(audio_p),
-                    "-vn",
-                    "-filter_complex", filter_complex,
-                    "-map", "[aout]",
-                ] + a_common + [str(output_path)]
-        else:
-            if has_orig_audio:
-                filter_complex = (
-                    f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1,atrim=0:{target_dur:.4f},apad=whole_dur={target_dur:.4f}[bga]; "
-                    f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1,atrim=0:{target_dur:.4f},apad=whole_dur={target_dur:.4f}[duba]; "
-                    f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0,aresample=48000,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}[aout]"
-                )
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-ss", str(seg.start_sec),
-                    "-t", str(seg.duration_sec),
-                    "-i", str(video_path),
-                    "-i", str(audio_p),
-                    "-vn",
-                    "-filter_complex", filter_complex,
-                    "-map", "[aout]",
-                ] + a_common + [str(output_path)]
-            else:
-                filter_complex = f"[0:a]atempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}[aout]"
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-i", str(audio_p),
-                    "-vn",
-                    "-filter_complex", filter_complex,
-                    "-map", "[aout]",
-                ] + a_common + [str(output_path)]
-
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-        if res.returncode != 0:
-            raise RuntimeError(f"Failed to render audio segment {seg.seg_id}: {res.stderr.strip() or 'Unknown error'}")
-
-    def _encode_single_segment(
-        self,
-        video_path: Path,
-        seg: TimelineSegment,
-        output_path: Path,
-        video_meta: VideoMetadata,
-        v_encoder_params: List[str],
-    ):
-        """Encode a single segment (gap or dub) with GPU-accelerated video stream."""
-        target_fps = 30.0 if video_meta.fps <= 0 else min(60.0, video_meta.fps)
-        a_common = [
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-ar", "48000",
-            "-ac", "2",
-        ]
-
-        has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
-
-        if seg.seg_type == "gap":
-            if has_orig_audio:
-                filter_complex = f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1[aout]"
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-ss", str(seg.start_sec),
-                    "-t", str(seg.duration_sec),
-                    "-i", str(video_path),
-                    "-filter_complex", filter_complex,
-                    "-map", "0:v:0",
-                    "-map", "[aout]",
-                ] + v_encoder_params + a_common + [str(output_path)]
-            else:
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-ss", str(seg.start_sec),
-                    "-t", str(seg.duration_sec),
-                    "-i", str(video_path),
-                    "-f", "lavfi", "-t", str(seg.duration_sec), "-i", "anullsrc=r=48000:cl=stereo",
-                    "-map", "0:v:0",
-                    "-map", "1:a:0",
-                ] + v_encoder_params + a_common + [str(output_path)]
-
-            is_gpu = any("nvenc" in p or "qsv" in p for p in v_encoder_params)
-            if is_gpu:
-                with _GPU_SEMAPHORE:
-                    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-            else:
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-
+        tempo = seg.speed_applied or 1.0
+        if seg.sync_mode == "rubberband" and abs(tempo - 1.0) > 0.01:
+            tempo = max(0.5, min(2.5, tempo))
+            # Try rubberband first
+            filter_str = f"rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}"
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(audio_p),
+                "-vn",
+                "-af", filter_str,
+            ] + a_common + [str(output_path)]
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
             if res.returncode != 0:
-                self._retry_with_cpu_atempo(video_path, seg, output_path, video_meta, target_fps)
-
-        elif seg.seg_type == "dub":
-            audio_p = Path(seg.audio_path)
-            ratio = seg.ratio or 1.0
-
-            if seg.sync_mode == "passthrough":
-                if has_orig_audio:
-                    filter_complex = (
-                        f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1[bga]; "
-                        f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1[duba]; "
-                        f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
-                    )
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(seg.start_sec),
-                        "-t", str(seg.duration_sec),
-                        "-i", str(video_path),
-                        "-i", str(audio_p),
-                        "-filter_complex", filter_complex,
-                        "-map", "0:v:0",
-                        "-map", "[aout]",
-                    ] + v_encoder_params + a_common + [str(output_path)]
-                else:
-                    filter_complex = f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1,apad[aout]"
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(seg.start_sec),
-                        "-t", str(seg.duration_sec),
-                        "-i", str(video_path),
-                        "-i", str(audio_p),
-                        "-filter_complex", filter_complex,
-                        "-map", "0:v:0",
-                        "-map", "[aout]",
-                    ] + v_encoder_params + a_common + [str(output_path)]
-
-            elif seg.sync_mode == "rubberband":
-                tempo = max(1.0, min(2.0, seg.speed_applied or (1.0 / ratio)))
-
-                if has_orig_audio:
-                    filter_complex = (
-                        f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1[bga]; "
-                        f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1[duba]; "
-                        f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
-                    )
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(seg.start_sec),
-                        "-t", str(seg.duration_sec),
-                        "-i", str(video_path),
-                        "-i", str(audio_p),
-                        "-filter_complex", filter_complex,
-                        "-map", "0:v:0",
-                        "-map", "[aout]",
-                    ] + v_encoder_params + a_common + [str(output_path)]
-                else:
-                    filter_complex = f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1,apad[aout]"
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(seg.start_sec),
-                        "-t", str(seg.duration_sec),
-                        "-i", str(video_path),
-                        "-i", str(audio_p),
-                        "-filter_complex", filter_complex,
-                        "-map", "0:v:0",
-                        "-map", "[aout]",
-                    ] + v_encoder_params + a_common + [str(output_path)]
-
-            else:
-                v_speed = seg.video_speed_applied or ratio
-                setpts_factor = 1.0 / max(0.1, v_speed)
-
-                if has_orig_audio:
-                    bg_tempo = max(0.25, min(4.0, v_speed))
-                    filter_complex = (
-                        f"[0:v]setpts={setpts_factor:.4f}*PTS[vout]; "
-                        f"[0:a]volume={self.orig_volume:.4f},rubberband=tempo={bg_tempo:.4f},aresample=48000:async=1[bga]; "
-                        f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1[duba]; "
-                        f"[bga][duba]amix=inputs=2:duration=longest:dropout_transition=0[aout]"
-                    )
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(seg.start_sec),
-                        "-t", str(seg.duration_sec),
-                        "-i", str(video_path),
-                        "-i", str(audio_p),
-                        "-filter_complex", filter_complex,
-                        "-map", "[vout]",
-                        "-map", "[aout]",
-                    ] + v_encoder_params + a_common + [str(output_path)]
-                else:
-                    filter_complex = (
-                        f"[0:v]setpts={setpts_factor:.4f}*PTS[vout]; "
-                        f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1[aout]"
-                    )
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(seg.start_sec),
-                        "-t", str(seg.duration_sec),
-                        "-i", str(video_path),
-                        "-i", str(audio_p),
-                        "-filter_complex", filter_complex,
-                        "-map", "[vout]",
-                        "-map", "[aout]",
-                    ] + v_encoder_params + a_common + [str(output_path)]
-
-            is_gpu = any("nvenc" in p or "qsv" in p for p in v_encoder_params)
-            if is_gpu:
-                with _GPU_SEMAPHORE:
-                    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-            else:
-                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-
-            if res.returncode != 0:
-                self._retry_with_cpu_atempo(video_path, seg, output_path, video_meta, target_fps)
-
-    def _retry_with_cpu_atempo(
-        self,
-        video_path: Path,
-        seg: TimelineSegment,
-        output_path: Path,
-        video_meta: VideoMetadata,
-        target_fps: float,
-    ):
-        """Ultra-reliable CPU fallback filter using libx264 ultrafast and atempo."""
-        has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
-        ratio = seg.ratio or 1.0
-        audio_p = Path(seg.audio_path) if seg.audio_path else None
-
-        v_common = [
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "20",
-            "-pix_fmt", "yuv420p",
-            "-r", str(target_fps),
-        ]
-        a_common = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
-
-        if seg.seg_type == "gap" or not audio_p or not audio_p.exists():
-            if has_orig_audio:
+                # Fallback to built-in atempo
+                filter_str = f"atempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}"
                 cmd = [
                     "ffmpeg", "-y",
-                    "-ss", str(seg.start_sec),
-                    "-t", str(seg.duration_sec),
-                    "-i", str(video_path),
-                    "-filter_complex", f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1[aout]",
-                    "-map", "0:v:0",
-                    "-map", "[aout]",
-                ] + v_common + a_common + [str(output_path)]
-            else:
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-ss", str(seg.start_sec),
-                    "-t", str(seg.duration_sec),
-                    "-i", str(video_path),
-                    "-f", "lavfi", "-t", str(seg.duration_sec), "-i", "anullsrc=r=48000:cl=stereo",
-                    "-map", "0:v:0",
-                    "-map", "1:a:0",
-                ] + v_common + a_common + [str(output_path)]
+                    "-i", str(audio_p),
+                    "-vn",
+                    "-af", filter_str,
+                ] + a_common + [str(output_path)]
+                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
         else:
-            if seg.sync_mode == "passthrough":
-                if has_orig_audio:
-                    filter_complex = (
-                        f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1[bga]; "
-                        f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1[duba]; "
-                        f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
-                    )
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(seg.start_sec),
-                        "-t", str(seg.duration_sec),
-                        "-i", str(video_path),
-                        "-i", str(audio_p),
-                        "-filter_complex", filter_complex,
-                        "-map", "0:v:0",
-                        "-map", "[aout]",
-                    ] + v_common + a_common + [str(output_path)]
-                else:
-                    filter_complex = f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1,apad[aout]"
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(seg.start_sec),
-                        "-t", str(seg.duration_sec),
-                        "-i", str(video_path),
-                        "-i", str(audio_p),
-                        "-filter_complex", filter_complex,
-                        "-map", "0:v:0",
-                        "-map", "[aout]",
-                    ] + v_common + a_common + [str(output_path)]
-
-            elif seg.sync_mode == "rubberband":
-                tempo = max(1.0, min(2.0, seg.speed_applied or (1.0 / ratio)))
-                if has_orig_audio:
-                    filter_complex = (
-                        f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1[bga]; "
-                        f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1[duba]; "
-                        f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
-                    )
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(seg.start_sec),
-                        "-t", str(seg.duration_sec),
-                        "-i", str(video_path),
-                        "-i", str(audio_p),
-                        "-filter_complex", filter_complex,
-                        "-map", "0:v:0",
-                        "-map", "[aout]",
-                    ] + v_common + a_common + [str(output_path)]
-                else:
-                    filter_complex = f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1,apad[aout]"
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(seg.start_sec),
-                        "-t", str(seg.duration_sec),
-                        "-i", str(video_path),
-                        "-i", str(audio_p),
-                        "-filter_complex", filter_complex,
-                        "-map", "0:v:0",
-                        "-map", "[aout]",
-                    ] + v_common + a_common + [str(output_path)]
-
-            else:
-                v_speed = seg.video_speed_applied or ratio
-                setpts_factor = 1.0 / max(0.1, v_speed)
-                bg_tempo = max(0.25, min(4.0, v_speed))
-                if has_orig_audio:
-                    filter_complex = (
-                        f"[0:v]setpts={setpts_factor:.4f}*PTS[vout]; "
-                        f"[0:a]volume={self.orig_volume:.4f},atempo={bg_tempo:.4f},aresample=48000:async=1[bga]; "
-                        f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1[duba]; "
-                        f"[bga][duba]amix=inputs=2:duration=longest:dropout_transition=0[aout]"
-                    )
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(seg.start_sec),
-                        "-t", str(seg.duration_sec),
-                        "-i", str(video_path),
-                        "-i", str(audio_p),
-                        "-filter_complex", filter_complex,
-                        "-map", "[vout]",
-                        "-map", "[aout]",
-                    ] + v_common + a_common + [str(output_path)]
-                else:
-                    filter_complex = (
-                        f"[0:v]setpts={setpts_factor:.4f}*PTS[vout]; "
-                        f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1[aout]"
-                    )
-                    cmd = [
-                        "ffmpeg", "-y",
-                        "-ss", str(seg.start_sec),
-                        "-t", str(seg.duration_sec),
-                        "-i", str(video_path),
-                        "-i", str(audio_p),
-                        "-filter_complex", filter_complex,
-                        "-map", "[vout]",
-                        "-map", "[aout]",
-                    ] + v_common + a_common + [str(output_path)]
-
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-        if res.returncode != 0:
-            err_msg = res.stderr.strip() if res.stderr else "Unknown FFmpeg error"
-            raise RuntimeError(f"Failed to encode segment {seg.seg_id}: {err_msg}")
+            # Passthrough 1.0x with volume and sample-accurate pad/trim
+            filter_str = f"volume={self.dub_volume:.4f},aresample=48000:async=1,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}"
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(audio_p),
+                "-vn",
+                "-af", filter_str,
+            ] + a_common + [str(output_path)]
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
