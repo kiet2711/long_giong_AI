@@ -199,35 +199,40 @@ class SRTParser:
         seg_id = 1
 
         for sub in subtitles:
+            actual_start = max(current_time, sub.start_sec)
+            actual_end = max(actual_start + 0.1, sub.end_sec)
+            actual_duration = round(actual_end - actual_start, 3)
+
             # Check gap before this subtitle
-            gap_duration = sub.start_sec - current_time
+            gap_duration = round(actual_start - current_time, 3)
             if gap_duration >= min_gap_sec:
                 segments.append(
                     TimelineSegment(
                         seg_id=seg_id,
                         seg_type="gap",
                         start_sec=round(current_time, 3),
-                        end_sec=round(sub.start_sec, 3),
-                        duration_sec=round(gap_duration, 3),
+                        end_sec=round(actual_start, 3),
+                        duration_sec=gap_duration,
                         sync_mode="passthrough",
                     )
                 )
                 seg_id += 1
+                current_time = actual_start
 
             # Add dubbed subtitle segment
             segments.append(
                 TimelineSegment(
                     seg_id=seg_id,
                     seg_type="dub",
-                    start_sec=round(sub.start_sec, 3),
-                    end_sec=round(sub.end_sec, 3),
-                    duration_sec=round(sub.duration_sec, 3),
+                    start_sec=round(actual_start, 3),
+                    end_sec=round(actual_end, 3),
+                    duration_sec=actual_duration,
                     text_dub=sub.text_dub,
                     text_orig=sub.text_orig,
                 )
             )
             seg_id += 1
-            current_time = sub.end_sec
+            current_time = actual_end
 
         # Check trailing gap at the end of video
         if total_video_duration and (total_video_duration - current_time) >= min_gap_sec:

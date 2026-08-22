@@ -78,6 +78,13 @@ const el = {
   btnModalClose: document.getElementById('btnModalClose'),
   btnDownloadResult: document.getElementById('btnDownloadResult'),
   btnDownloadSrt: document.getElementById('btnDownloadSrt'),
+
+  // Floating Job Status
+  floatingJobPill: document.getElementById('floatingJobPill'),
+  floatingSpinner: document.getElementById('floatingSpinner'),
+  floatingJobTitle: document.getElementById('floatingJobTitle'),
+  floatingJobPct: document.getElementById('floatingJobPct'),
+  btnOpenModalFromFloating: document.getElementById('btnOpenModalFromFloating'),
 };
 
 // --- Initialization ---
@@ -89,6 +96,7 @@ document.addEventListener('DOMContentLoaded', () => {
   updateOrigVolUI();
   updateDubVolUI();
   updateSpeedLimitsUI();
+  checkAndRestoreActiveJob();
 });
 
 function updateSpeedLimitsUI() {
@@ -333,9 +341,29 @@ function setupEventListeners() {
 
   // Start Dubbing Button
   el.btnStartDubbing.addEventListener('click', startDubbingProcess);
-  el.btnModalClose.addEventListener('click', () => {
-    el.modalBackdrop.classList.remove('show');
-  });
+  if (el.btnModalClose) {
+    el.btnModalClose.addEventListener('click', () => {
+      el.modalBackdrop.classList.remove('show');
+      if (state.currentJobId && el.floatingJobPill) {
+        el.floatingJobPill.style.display = 'flex';
+      }
+    });
+  }
+
+  if (el.btnOpenModalFromFloating) {
+    el.btnOpenModalFromFloating.addEventListener('click', (e) => {
+      e.stopPropagation();
+      el.modalBackdrop.classList.add('show');
+      if (el.floatingJobPill) el.floatingJobPill.style.display = 'none';
+    });
+  }
+
+  if (el.floatingJobPill) {
+    el.floatingJobPill.addEventListener('click', () => {
+      el.modalBackdrop.classList.add('show');
+      el.floatingJobPill.style.display = 'none';
+    });
+  }
 }
 
 async function handleFileSelection() {
@@ -584,6 +612,15 @@ async function startDubbingProcess() {
   el.btnDownloadResult.style.display = 'none';
   if (el.btnDownloadSrt) el.btnDownloadSrt.style.display = 'none';
 
+  if (el.floatingJobPill) {
+    el.floatingJobPill.classList.remove('completed');
+    el.floatingJobPill.style.display = 'none';
+    if (el.floatingSpinner) {
+      el.floatingSpinner.classList.remove('completed');
+      el.floatingSpinner.textContent = '';
+    }
+  }
+
   try {
     const res = await fetch('/api/start_dubbing', {
       method: 'POST',
@@ -594,6 +631,10 @@ async function startDubbingProcess() {
     if (!res.ok) throw new Error(data.detail || 'Không thể bắt đầu job');
 
     state.currentJobId = data.job_id;
+    try {
+      localStorage.setItem('active_dubbing_job_id', data.job_id);
+    } catch (e) {}
+
     connectWebSocket(data.job_id);
   } catch (err) {
     appendLog(`[LỖI] ${err.message}`);
@@ -617,9 +658,11 @@ function connectWebSocket(jobId) {
       const msg = JSON.parse(event.data);
       if (msg.percent !== undefined) {
         el.progressBarFill.style.width = `${msg.percent}%`;
+        if (el.floatingJobPct) el.floatingJobPct.textContent = `${Math.round(msg.percent)}%`;
       }
       if (msg.message) {
         el.statusMsg.textContent = msg.message;
+        if (el.floatingJobTitle) el.floatingJobTitle.textContent = msg.message;
         appendLog(`[${msg.stage?.toUpperCase() || 'INFO'}] ${msg.message}`);
       }
 
@@ -637,7 +680,15 @@ function connectWebSocket(jobId) {
         el.modalTitle.textContent = '🎉 Hoàn tất Lồng tiếng & Render!';
         el.progressBarFill.style.width = '100%';
         el.btnStartDubbing.disabled = false;
-        
+
+        if (el.floatingJobPill) el.floatingJobPill.classList.add('completed');
+        if (el.floatingSpinner) {
+          el.floatingSpinner.classList.add('completed');
+          el.floatingSpinner.textContent = '✅';
+        }
+        if (el.floatingJobTitle) el.floatingJobTitle.textContent = '🎉 Đã hoàn tất! Nhấn để tải về.';
+        if (el.floatingJobPct) el.floatingJobPct.textContent = '100%';
+
         if (msg.output_url) {
           el.btnDownloadResult.style.display = 'inline-flex';
           el.btnDownloadResult.onclick = () => {
@@ -656,6 +707,7 @@ function connectWebSocket(jobId) {
       } else if (msg.stage === 'failed') {
         el.modalTitle.textContent = '❌ Quá trình Render gặp lỗi';
         el.btnStartDubbing.disabled = false;
+        if (el.floatingJobTitle) el.floatingJobTitle.textContent = '❌ Lỗi xử lý';
       }
     } catch (e) {
       console.error('WS parse error:', e);
@@ -665,6 +717,61 @@ function connectWebSocket(jobId) {
   ws.onerror = (e) => {
     console.error('WS Error:', e);
   };
+}
+
+// --- Restore active job on page refresh / reopen ---
+function checkAndRestoreActiveJob() {
+  let savedJobId = null;
+  try {
+    savedJobId = localStorage.getItem('active_dubbing_job_id');
+  } catch (e) {}
+  if (!savedJobId) return;
+
+  fetch(`/api/job_status/${savedJobId}`)
+    .then((r) => (r.ok ? r.json() : null))
+    .then((job) => {
+      if (!job) {
+        try { localStorage.removeItem('active_dubbing_job_id'); } catch (e) {}
+        return;
+      }
+      state.currentJobId = savedJobId;
+
+      if (job.status === 'running' || job.status === 'started') {
+        if (el.floatingJobPill) {
+          el.floatingJobPill.style.display = 'flex';
+          el.floatingJobPill.classList.remove('completed');
+        }
+        if (el.floatingSpinner) {
+          el.floatingSpinner.classList.remove('completed');
+          el.floatingSpinner.textContent = '';
+        }
+        if (el.floatingJobTitle) el.floatingJobTitle.textContent = job.message || 'Đang xử lý lồng tiếng...';
+        if (el.floatingJobPct) el.floatingJobPct.textContent = `${Math.round(job.percent || 0)}%`;
+        connectWebSocket(savedJobId);
+      } else if (job.status === 'completed') {
+        if (el.floatingJobPill) {
+          el.floatingJobPill.style.display = 'flex';
+          el.floatingJobPill.classList.add('completed');
+        }
+        if (el.floatingSpinner) {
+          el.floatingSpinner.classList.add('completed');
+          el.floatingSpinner.textContent = '✅';
+        }
+        if (el.floatingJobTitle) el.floatingJobTitle.textContent = '🎉 Đã hoàn tất! Nhấn để tải về.';
+        if (el.floatingJobPct) el.floatingJobPct.textContent = '100%';
+
+        if (job.output_url) {
+          el.btnDownloadResult.style.display = 'inline-flex';
+          el.btnDownloadResult.onclick = () => window.open(job.output_url, '_blank');
+          loadVideoIntoPlayer(job.output_url);
+        }
+        if (job.output_srt_url && el.btnDownloadSrt) {
+          el.btnDownloadSrt.style.display = 'inline-flex';
+          el.btnDownloadSrt.onclick = () => window.open(job.output_srt_url, '_blank');
+        }
+      }
+    })
+    .catch(() => {});
 }
 
 function appendLog(text) {
