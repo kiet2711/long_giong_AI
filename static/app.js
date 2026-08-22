@@ -94,6 +94,16 @@ const el = {
   failedList: document.getElementById('failedList'),
   btnRetryAllFailed: document.getElementById('btnRetryAllFailed'),
   btnSkipFailedAndRender: document.getElementById('btnSkipFailedAndRender'),
+
+  // Cache & Projects
+  cacheStatsBadge: document.getElementById('cacheStatsBadge'),
+  cacheAlertBanner: document.getElementById('cacheAlertBanner'),
+  cacheAlertTitle: document.getElementById('cacheAlertTitle'),
+  cacheAlertDesc: document.getElementById('cacheAlertDesc'),
+  btnOpenProjects: document.getElementById('btnOpenProjects'),
+  projectsModalBackdrop: document.getElementById('projectsModalBackdrop'),
+  projectsList: document.getElementById('projectsList'),
+  btnCloseProjectsModal: document.getElementById('btnCloseProjectsModal'),
 };
 
 // --- Initialization ---
@@ -105,6 +115,7 @@ document.addEventListener('DOMContentLoaded', () => {
   updateOrigVolUI();
   updateDubVolUI();
   updateSpeedLimitsUI();
+  updateCacheStatsBadge();
   checkAndRestoreActiveJob();
 });
 
@@ -330,12 +341,17 @@ function setupEventListeners() {
   const btnCleanup = document.getElementById('btnCleanup');
   if (btnCleanup) {
     btnCleanup.addEventListener('click', async () => {
+      if (!confirm('Bạn có chắc chắn muốn dọn dẹp sạch toàn bộ file rác và bộ nhớ tạm? (Toàn bộ Video thành phẩm trong thư mục outputs sẽ luôn được giữ nguyên an toàn!)')) {
+        return;
+      }
       btnCleanup.disabled = true;
       btnCleanup.textContent = 'Đang dọn dẹp...';
       try {
         const res = await fetch('/api/cleanup', { method: 'POST' });
         const data = await res.json();
-        alert(data.message || 'Đã dọn dẹp thành công bộ nhớ đệm!');
+        alert(data.message || 'Đã dọn dẹp sạch toàn bộ bộ nhớ rác!');
+        updateCacheStatsBadge();
+        if (el.cacheAlertBanner) el.cacheAlertBanner.style.display = 'none';
       } catch (err) {
         alert('Lỗi dọn dẹp: ' + err.message);
       } finally {
@@ -410,6 +426,240 @@ function setupEventListeners() {
   if (el.btnSkipFailedAndRender) {
     el.btnSkipFailedAndRender.addEventListener('click', resumeDubbingRender);
   }
+
+  // Projects Modal Events
+  if (el.btnOpenProjects) {
+    el.btnOpenProjects.addEventListener('click', openProjectsModal);
+  }
+  if (el.btnCloseProjectsModal) {
+    el.btnCloseProjectsModal.addEventListener('click', closeProjectsModal);
+  }
+  if (el.projectsModalBackdrop) {
+    el.projectsModalBackdrop.addEventListener('click', (e) => {
+      if (e.target === el.projectsModalBackdrop) closeProjectsModal();
+    });
+  }
+
+  // Voice changes -> recheck cache
+  if (el.voiceSelect) {
+    el.voiceSelect.addEventListener('change', () => {
+      checkSubtitlesCache();
+    });
+  }
+  if (el.voiceRateSelect) {
+    el.voiceRateSelect.addEventListener('change', () => {
+      checkSubtitlesCache();
+    });
+  }
+}
+
+// --- Cache & Project Management Functions ---
+async function updateCacheStatsBadge() {
+  try {
+    const res = await fetch('/api/cache_stats');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (el.cacheStatsBadge) {
+      el.cacheStatsBadge.textContent = `⚡ Bộ nhớ đệm: ${data.total_cached_files} câu (${data.size_mb} MB)`;
+    }
+  } catch (e) {}
+}
+
+async function checkSubtitlesCache() {
+  if (!state.subtitles || state.subtitles.length === 0) {
+    if (el.cacheAlertBanner) el.cacheAlertBanner.style.display = 'none';
+    return;
+  }
+  try {
+    const res = await fetch('/api/check_cache', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        subtitles: state.subtitles,
+        voice: el.voiceSelect.value,
+        voice_rate: el.voiceRateSelect.value,
+      }),
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.subtitles) {
+      state.subtitles = data.subtitles;
+      renderSubtitleList(state.subtitles);
+    }
+    if (el.cacheAlertBanner && el.cacheAlertTitle && el.cacheAlertDesc) {
+      if (data.cached_count > 0) {
+        el.cacheAlertBanner.style.display = 'flex';
+        el.cacheAlertTitle.textContent = `⚡ Đã phát hiện ${data.cached_count.toLocaleString()} / ${data.total.toLocaleString()} câu (${data.cached_percent}%) có sẵn âm thanh trong Bộ nhớ đệm!`;
+        el.cacheAlertDesc.textContent = `Tiến trình tạo giọng đọc AI sẽ tự động tái sử dụng 100% các câu này trong 0 giây, chỉ cần tạo ${data.missing_count.toLocaleString()} câu còn thiếu.`;
+      } else {
+        el.cacheAlertBanner.style.display = 'none';
+      }
+    }
+    updateCacheStatsBadge();
+  } catch (e) {}
+}
+
+function openProjectsModal() {
+  if (el.projectsModalBackdrop) {
+    el.projectsModalBackdrop.classList.add('show');
+    loadProjectsList();
+  }
+}
+
+function closeProjectsModal() {
+  if (el.projectsModalBackdrop) {
+    el.projectsModalBackdrop.classList.remove('show');
+  }
+}
+
+async function loadProjectsList() {
+  if (!el.projectsList) return;
+  el.projectsList.innerHTML = '<div style="text-align: center; color: var(--muted); padding: 30px;">Đang tải danh sách dự án...</div>';
+
+  try {
+    const res = await fetch('/api/projects');
+    const data = await res.json();
+    const projects = data.projects || [];
+
+    if (projects.length === 0) {
+      el.projectsList.innerHTML = `
+        <div style="text-align: center; color: var(--muted); padding: 30px;">
+          <div style="font-size: 32px; margin-bottom: 8px;">📂</div>
+          <div style="font-weight: 600; margin-bottom: 4px;">Chưa có dự án nào được lưu</div>
+          <div style="font-size: 12px;">Khi bạn tải video hoặc SRT lên, dự án sẽ tự động được lưu tại đây để mở lại bất cứ lúc nào.</div>
+        </div>
+      `;
+      return;
+    }
+
+    el.projectsList.innerHTML = '';
+    projects.forEach((proj) => {
+      const card = document.createElement('div');
+      card.className = 'project-card';
+
+      let statusBadge = '';
+      if (proj.status === 'completed') {
+        statusBadge = '<span class="project-status-pill completed">✅ Hoàn tất</span>';
+      } else if (proj.status === 'needs_review') {
+        statusBadge = '<span class="project-status-pill needs_review">⚠️ Cần xem xét câu lỗi</span>';
+      } else {
+        statusBadge = '<span class="project-status-pill ready">⚡ Sẵn sàng</span>';
+      }
+
+      const cachedPct = proj.cached_percent || 0;
+      const totalSegs = proj.total_segments || 0;
+      const cachedSegs = proj.cached_segments || 0;
+
+      card.innerHTML = `
+        <div class="project-card-header">
+          <div>
+            <div class="project-card-title">${escapeHtml(proj.name || 'Dự án không tên')}</div>
+            <div style="font-size: 11px; color: var(--muted); margin-top: 2px;">Mã: ${proj.project_id} &bull; Cập nhật: ${proj.updated_at || ''}</div>
+          </div>
+          ${statusBadge}
+        </div>
+
+        <div class="project-card-meta">
+          <span>🎬 Video: ${proj.video_path ? escapeHtml(proj.video_path.split(/[\\/]/).pop()) : 'Chưa có'}</span>
+          <span>📝 Phụ đề: ${totalSegs} câu</span>
+          <span>🎙️ Giọng: ${escapeHtml(proj.voice || 'Mặc định')} (${proj.voice_rate || '1.0'}x)</span>
+        </div>
+
+        <div class="project-cache-bar-wrap">
+          <div class="project-cache-bar-bg">
+            <div class="project-cache-bar-fill" style="width: ${cachedPct}%;"></div>
+          </div>
+          <span style="font-size: 11px; font-weight: 700; color: ${cachedPct >= 90 ? '#34D399' : '#60A5FA'}; white-space: nowrap;">
+            ${cachedSegs.toLocaleString()} / ${totalSegs.toLocaleString()} câu (${cachedPct}%)
+          </span>
+        </div>
+
+        <div class="project-card-actions">
+          <button class="btn btn-outline btn-sm btn-delete-proj" data-id="${proj.project_id}" style="color: #F87171; border-color: rgba(248,113,113,0.3);">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+            Xóa
+          </button>
+          <button class="btn btn-teal btn-sm btn-load-proj" data-id="${proj.project_id}">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
+            Mở Dự Án Này
+          </button>
+        </div>
+      `;
+
+      card.querySelector('.btn-load-proj').addEventListener('click', () => selectProject(proj.project_id));
+      card.querySelector('.btn-delete-proj').addEventListener('click', (e) => deleteProject(proj.project_id, e));
+
+      el.projectsList.appendChild(card);
+    });
+
+  } catch (err) {
+    el.projectsList.innerHTML = `<div style="color: #F87171; padding: 20px; text-align: center;">Lỗi tải dự án: ${err.message}</div>`;
+  }
+}
+
+async function selectProject(projectId) {
+  try {
+    const res = await fetch('/api/projects/load', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: projectId }),
+    });
+    if (!res.ok) throw new Error('Không thể nạp dự án');
+    const data = await res.json();
+
+    state.videoPath = data.video_path;
+    state.videoUrl = data.video_url;
+    state.videoMeta = data.video_meta;
+    state.srtDubPath = data.srt_dub_path;
+    state.srtOrigPath = data.srt_orig_path;
+    state.subtitles = data.subtitles || [];
+
+    if (data.video_path) {
+      el.videoFileName.textContent = data.video_path.split(/[\\/]/).pop();
+    }
+    if (data.srt_dub_path) {
+      el.srtDubFileName.textContent = data.srt_dub_path.split(/[\\/]/).pop();
+    }
+    if (data.srt_orig_path) {
+      el.srtOrigFileName.textContent = data.srt_orig_path.split(/[\\/]/).pop();
+    }
+
+    if (data.voice && el.voiceSelect) el.voiceSelect.value = data.voice;
+    if (data.voice_rate && el.voiceRateSelect) el.voiceRateSelect.value = data.voice_rate;
+
+    state.currentJobId = data.project_id || projectId;
+    try { localStorage.setItem('active_dubbing_job_id', state.currentJobId); } catch (e) {}
+
+    if (data.video_url) {
+      loadVideoIntoPlayer(data.video_url);
+    }
+
+    if (state.subtitles.length > 0) {
+      renderSubtitleList(state.subtitles);
+      checkSubtitlesCache();
+    }
+
+    closeProjectsModal();
+    appendLog(`[HỆ THỐNG] Đã nạp thành công dự án "${data.name}" (${data.cached_segments || 0}/${data.total_segments || 0} câu đã có trong Cache).`);
+  } catch (err) {
+    alert('Lỗi nạp dự án: ' + err.message);
+  }
+}
+
+async function deleteProject(projectId, evt) {
+  evt.stopPropagation();
+  if (!confirm('Bạn có chắc chắn muốn xóa dự án này khỏi danh sách?')) return;
+  try {
+    const res = await fetch('/api/projects/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: projectId }),
+    });
+    if (!res.ok) throw new Error('Không thể xóa dự án');
+    loadProjectsList();
+  } catch (err) {
+    alert('Lỗi xóa dự án: ' + err.message);
+  }
 }
 
 async function handleFileSelection() {
@@ -451,7 +701,9 @@ async function handleFileSelection() {
     if (data.subtitles && data.subtitles.length > 0) {
       state.subtitles = data.subtitles;
       renderSubtitleList(state.subtitles);
+      checkSubtitlesCache();
     }
+    updateCacheStatsBadge();
   } catch (err) {
     alert('Lỗi tải file lên: ' + err.message);
   }
@@ -513,12 +765,16 @@ function renderSubtitleList(subs) {
     div.dataset.end = item.end_sec;
 
     const badgeInfo = getSpeedBadgeInfo(item);
+    const cacheTagHtml = item.has_cache 
+      ? `<span class="sub-cache-tag cached" title="Đã có âm thanh trong Cache (Tải 0s)">⚡ Sẵn sàng</span>` 
+      : `<span class="sub-cache-tag missing" title="Chưa tạo âm thanh">⏳ Chưa tạo</span>`;
 
     div.innerHTML = `
       <div class="srt-idx">${String(item.index).padStart(2, '0')}</div>
       <div class="srt-body">
         <div class="srt-time">
           <span>${fmtTime(item.start_sec)} → ${fmtTime(item.end_sec)} (${item.duration_sec.toFixed(1)}s)</span>
+          ${cacheTagHtml}
           <span class="ratio ${badgeInfo.cls}" id="ratio-badge-${item.index}">${badgeInfo.text}</span>
         </div>
         <div class="srt-text">${escapeHtml(item.text_dub)}</div>
@@ -689,126 +945,192 @@ async function startDubbingProcess() {
   }
 }
 
-// --- WebSocket Live Progress Stream ---
-function connectWebSocket(jobId) {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = `${protocol}//${window.location.host}/ws/progress/${jobId}`;
-  const ws = new WebSocket(wsUrl);
+// --- Live Progress Handler (Unified for WS & Polling) ---
+let pollIntervalTimer = null;
 
-  ws.onopen = () => {
-    appendLog('[HỆ THỐNG] Đã kết nối WebSocket tiến độ thời gian thực.');
-  };
-
-  ws.onmessage = (event) => {
-    try {
-      const msg = JSON.parse(event.data);
-      if (msg.percent !== undefined) {
-        el.progressBarFill.style.width = `${msg.percent}%`;
-        if (el.floatingJobPct) el.floatingJobPct.textContent = `${Math.round(msg.percent)}%`;
-      }
-      if (msg.message) {
-        el.statusMsg.textContent = msg.message;
-        if (el.floatingJobTitle) el.floatingJobTitle.textContent = msg.message;
-        appendLog(`[${msg.stage?.toUpperCase() || 'INFO'}] ${msg.message}`);
-      }
-
-      // Live update speed badge in table
-      if (msg.data && msg.data.seg_id) {
-        const badge = document.getElementById(`ratio-badge-${msg.data.seg_id}`);
-        if (badge) {
-          badge.textContent = msg.data.sync_desc || (msg.data.ratio ? `${msg.data.ratio.toFixed(2)}x` : '1.0x');
-          badge.className = `ratio ${msg.data.sync_mode === 'setpts' ? 'warn' : 'ok'}`;
-        }
-      }
-
-      // Needs Review Stage (Failed TTS segments)
-      if (msg.stage === 'tts_needs_review') {
-        el.modalTitle.textContent = '⚠️ Cần xem xét câu lỗi CapCut';
-        el.btnStartDubbing.disabled = false;
-        const failed = msg.data?.failed_segments || msg.failed_segments || [];
-        renderFailedSegmentsReview(failed);
-      }
-
-      // Completed
-      if (msg.stage === 'completed') {
-        el.modalTitle.textContent = '🎉 Hoàn tất Lồng tiếng & Render!';
-        el.progressBarFill.style.width = '100%';
-        el.btnStartDubbing.disabled = false;
-        if (el.failedReviewContainer) el.failedReviewContainer.style.display = 'none';
-
-        if (el.floatingJobPill) el.floatingJobPill.classList.add('completed');
-        if (el.floatingSpinner) {
-          el.floatingSpinner.classList.add('completed');
-          el.floatingSpinner.textContent = '✅';
-        }
-        if (el.floatingJobTitle) el.floatingJobTitle.textContent = '🎉 Đã hoàn tất! Nhấn để tải về.';
-        if (el.floatingJobPct) el.floatingJobPct.textContent = '100%';
-
-        // Update state.subtitles with newly shifted timecodes
-        if (msg.result && msg.result.timeline) {
-          updateSubtitlesFromTimeline(msg.result.timeline);
-        }
-
-        if (el.btnOpenVideo) el.btnOpenVideo.style.display = 'inline-flex';
-        if (el.btnOpenFolder) el.btnOpenFolder.style.display = 'inline-flex';
-
-        if (msg.output_url) {
-          el.btnDownloadResult.style.display = 'inline-flex';
-          el.btnDownloadResult.onclick = () => {
-            window.open(msg.output_url, '_blank');
-          };
-          // Automatically load final dubbed video into player
-          loadVideoIntoPlayer(msg.output_url);
-        }
-
-        if (msg.output_srt_url && el.btnDownloadSrt) {
-          el.btnDownloadSrt.style.display = 'inline-flex';
-          el.btnDownloadSrt.onclick = () => {
-            window.open(msg.output_srt_url, '_blank');
-          };
-        }
-      } else if (msg.stage === 'failed') {
-        el.modalTitle.textContent = '❌ Quá trình Render gặp lỗi';
-        el.btnStartDubbing.disabled = false;
-        if (el.floatingJobTitle) el.floatingJobTitle.textContent = '❌ Lỗi xử lý';
-      }
-    } catch (e) {
-      console.error('WS parse error:', e);
+function startJobPolling(jobId) {
+  if (pollIntervalTimer) clearInterval(pollIntervalTimer);
+  pollIntervalTimer = setInterval(async () => {
+    if (!state.currentJobId || state.currentJobId !== jobId) {
+      clearInterval(pollIntervalTimer);
+      return;
     }
-  };
+    try {
+      const res = await fetch(`/api/job_status/${jobId}`);
+      if (res.ok) {
+        const data = await res.json();
+        handleJobUpdate(data);
+        if (data.status === 'completed' || data.status === 'failed') {
+          clearInterval(pollIntervalTimer);
+        }
+      }
+    } catch (e) {}
+  }, 1500);
+}
 
-  ws.onerror = (e) => {
-    console.error('WS Error:', e);
-  };
+let lastLoggedMessage = '';
+
+function handleJobUpdate(msg) {
+  if (!msg) return;
+
+  if (msg.percent !== undefined) {
+    el.progressBarFill.style.width = `${msg.percent}%`;
+    if (el.floatingJobPct) el.floatingJobPct.textContent = `${Math.round(msg.percent)}%`;
+  }
+  if (msg.message) {
+    el.statusMsg.textContent = msg.message;
+    if (el.floatingJobTitle) el.floatingJobTitle.textContent = msg.message;
+    if ((msg.stage || msg.status) && msg.message !== lastLoggedMessage) {
+      lastLoggedMessage = msg.message;
+      appendLog(`[${(msg.stage || msg.status || 'INFO').toUpperCase()}] ${msg.message}`);
+    }
+  }
+
+  // Live update speed badge in table
+  if (msg.data && msg.data.seg_id) {
+    const badge = document.getElementById(`ratio-badge-${msg.data.seg_id}`);
+    if (badge) {
+      badge.textContent = msg.data.sync_desc || (msg.data.ratio ? `${msg.data.ratio.toFixed(2)}x` : '1.0x');
+      badge.className = `ratio ${msg.data.sync_mode === 'setpts' ? 'warn' : 'ok'}`;
+    }
+  }
+
+  // Needs Review Stage (Failed TTS segments)
+  if (msg.stage === 'tts_needs_review' || msg.status === 'needs_review') {
+    el.modalTitle.textContent = '⚠️ Cần xem xét câu lỗi CapCut';
+    el.btnStartDubbing.disabled = false;
+    const failed = msg.data?.failed_segments || msg.failed_segments || [];
+    renderFailedSegmentsReview(failed);
+  }
+
+  // Completed
+  if (msg.stage === 'completed' || msg.status === 'completed') {
+    el.modalTitle.textContent = '🎉 Hoàn tất Lồng tiếng & Render!';
+    el.progressBarFill.style.width = '100%';
+    el.btnStartDubbing.disabled = false;
+    if (el.failedReviewContainer) el.failedReviewContainer.style.display = 'none';
+
+    if (el.floatingJobPill) el.floatingJobPill.classList.add('completed');
+    if (el.floatingSpinner) {
+      el.floatingSpinner.classList.add('completed');
+      el.floatingSpinner.textContent = '✅';
+    }
+    if (el.floatingJobTitle) el.floatingJobTitle.textContent = '🎉 Đã hoàn tất! Nhấn để tải về.';
+    if (el.floatingJobPct) el.floatingJobPct.textContent = '100%';
+
+    // Update state.subtitles with newly shifted timecodes
+    if (msg.result && msg.result.timeline) {
+      updateSubtitlesFromTimeline(msg.result.timeline);
+    }
+
+    if (el.btnOpenVideo) el.btnOpenVideo.style.display = 'inline-flex';
+    if (el.btnOpenFolder) el.btnOpenFolder.style.display = 'inline-flex';
+
+    const vidUrl = msg.output_url || (msg.result && msg.result.output_url);
+    if (vidUrl) {
+      el.btnDownloadResult.style.display = 'inline-flex';
+      el.btnDownloadResult.onclick = () => {
+        window.open(vidUrl, '_blank');
+      };
+      // Automatically load final dubbed video into player
+      loadVideoIntoPlayer(vidUrl);
+    }
+
+    const srtUrl = msg.output_srt_url || (msg.result && msg.result.output_srt_url);
+    if (srtUrl && el.btnDownloadSrt) {
+      el.btnDownloadSrt.style.display = 'inline-flex';
+      el.btnDownloadSrt.onclick = () => {
+        window.open(srtUrl, '_blank');
+      };
+    }
+  } else if (msg.stage === 'failed' || msg.status === 'failed') {
+    el.modalTitle.textContent = '❌ Quá trình Render gặp lỗi';
+    el.btnStartDubbing.disabled = false;
+    if (el.floatingJobTitle) el.floatingJobTitle.textContent = '❌ Lỗi xử lý';
+  }
+}
+
+// --- WebSocket Live Progress Stream with Polling Fallback ---
+function connectWebSocket(jobId) {
+  startJobPolling(jobId);
+  try {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws/progress/${jobId}`;
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      appendLog('[HỆ THỐNG] Đã kết nối WebSocket tiến độ thời gian thực.');
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        handleJobUpdate(msg);
+      } catch (e) {
+        console.error('WS parse error:', e);
+      }
+    };
+
+    ws.onerror = (e) => {
+      console.warn('WS fallback to polling active');
+    };
+  } catch (e) {
+    console.warn('WS Init failed, polling will handle updates:', e);
+  }
 }
 
 // --- Render Failed Sentences Review Box ---
 function renderFailedSegmentsReview(failedSegments) {
   if (!el.failedReviewContainer || !el.failedList) return;
-  el.failedList.innerHTML = '';
+  if (!failedSegments || failedSegments.length === 0) return;
+
   el.failedCountBadge.textContent = failedSegments.length;
   el.failedReviewContainer.style.display = 'block';
+
+  // Guard: If list is already rendered for current job, do NOT wipe user input on polling ticks!
+  const currentRenderKey = `${state.currentJobId}_${failedSegments.map(s => s.seg_id).join(',')}`;
+  if (el.failedList.dataset.renderKey === currentRenderKey && el.failedList.children.length > 0) {
+    return;
+  }
+  el.failedList.dataset.renderKey = currentRenderKey;
+  el.failedList.innerHTML = '';
 
   failedSegments.forEach((seg) => {
     const itemDiv = document.createElement('div');
     itemDiv.className = 'failed-item';
     itemDiv.id = `failed-item-${seg.seg_id}`;
+    itemDiv.style.flexDirection = 'column';
+    itemDiv.style.alignItems = 'stretch';
+
+    const hasChinese = /[\u4e00-\u9fa5]/.test(seg.text_dub || '');
+    const isVnVoice = (el.voiceSelect.value || '').startsWith('BV421') || (el.voiceSelect.value || '').startsWith('BV074') || (el.voiceSelect.value || '').startsWith('vi_');
+    const langWarningHtml = (hasChinese && isVnVoice)
+      ? `<div class="failed-err-msg" style="color: #F87171; font-size: 11px; margin-top: 4px;">⚠️ Câu này đang là chữ tiếng Trung nên giọng Việt không đọc được. Vui lòng nhập bản dịch tiếng Việt vào ô trên rồi bấm "Thử lại".</div>`
+      : '';
 
     itemDiv.innerHTML = `
-      <div class="failed-item-idx">#${String(seg.seg_id).padStart(2, '0')}</div>
-      <input type="text" class="failed-item-input" id="failed-input-${seg.seg_id}" value="${escapeHtml(seg.text_dub)}" placeholder="Nội dung câu..." />
-      <button class="failed-item-btn" id="btn-retry-${seg.seg_id}">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
-        Thử lại
-      </button>
+      <div style="display: flex; align-items: center; gap: 10px; width: 100%;">
+        <div class="failed-item-idx">#${String(seg.seg_id).padStart(2, '0')}</div>
+        <input type="text" class="failed-item-input" id="failed-input-${seg.seg_id}" value="${escapeHtml(seg.text_dub)}" placeholder="Nhập câu tiếng Việt thay thế..." />
+        <button class="failed-item-btn" id="btn-retry-${seg.seg_id}">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+          Thử lại
+        </button>
+      </div>
+      <div class="failed-err-container" id="failed-err-${seg.seg_id}">
+        ${langWarningHtml}
+      </div>
     `;
 
     const retryBtn = itemDiv.querySelector(`#btn-retry-${seg.seg_id}`);
     const inputEl = itemDiv.querySelector(`#failed-input-${seg.seg_id}`);
+    const errContainer = itemDiv.querySelector(`#failed-err-${seg.seg_id}`);
 
     retryBtn.addEventListener('click', async () => {
       retryBtn.disabled = true;
-      retryBtn.innerHTML = 'Đang thử...';
+      retryBtn.innerHTML = 'Đang tạo...';
+      if (errContainer) errContainer.innerHTML = '';
+
       try {
         const res = await fetch('/api/retry_tts_segments', {
           method: 'POST',
@@ -822,12 +1144,16 @@ function renderFailedSegmentsReview(failedSegments) {
         });
         const data = await res.json();
         const updatedSeg = (data.updated_segments || [])[0];
+
         if (updatedSeg && !updatedSeg.is_failed) {
           itemDiv.classList.add('success');
           retryBtn.className = 'failed-item-btn btn-done';
           retryBtn.innerHTML = '✅ Đã tạo';
           retryBtn.disabled = true;
           inputEl.disabled = true;
+          if (errContainer) errContainer.innerHTML = '<div style="color: #34D399; font-size: 11px; margin-top: 4px;">✅ Tạo âm thanh AI thành công!</div>';
+          appendLog(`[HỆ THỐNG] Câu #${seg.seg_id} đã tạo âm thanh thành công.`);
+
           if (data.remaining_failed === 0) {
             appendLog('[HỆ THỐNG] Đã tạo thành công tất cả câu lỗi! Tự động tiếp tục Render Video...');
             setTimeout(resumeDubbingRender, 1000);
@@ -835,11 +1161,18 @@ function renderFailedSegmentsReview(failedSegments) {
         } else {
           retryBtn.disabled = false;
           retryBtn.innerHTML = '❌ Thử lại';
-          appendLog(`[TTS LỖI] Câu #${seg.seg_id}: ${updatedSeg?.tts_error || 'Thất bại'}`);
+          const errMsg = updatedSeg?.tts_error || 'CapCut từ chối văn bản';
+          if (errContainer) {
+            errContainer.innerHTML = `<div style="color: #F87171; font-size: 11px; margin-top: 4px;">❌ Lỗi: ${escapeHtml(errMsg)}</div>`;
+          }
+          appendLog(`[TTS LỖI] Câu #${seg.seg_id}: ${errMsg}`);
         }
       } catch (err) {
         retryBtn.disabled = false;
         retryBtn.innerHTML = '❌ Thử lại';
+        if (errContainer) {
+          errContainer.innerHTML = `<div style="color: #F87171; font-size: 11px; margin-top: 4px;">❌ Lỗi kết nối: ${escapeHtml(err.message)}</div>`;
+        }
         appendLog(`[LỖI] ${err.message}`);
       }
     });
@@ -883,6 +1216,8 @@ async function retryAllFailedSegments() {
       if (itemDiv) {
         const retryBtn = itemDiv.querySelector('.failed-item-btn');
         const inputEl = itemDiv.querySelector('.failed-item-input');
+        const errContainer = itemDiv.querySelector('.failed-err-container');
+
         if (!updatedSeg.is_failed) {
           itemDiv.classList.add('success');
           if (retryBtn) {
@@ -891,6 +1226,15 @@ async function retryAllFailedSegments() {
             retryBtn.disabled = true;
           }
           if (inputEl) inputEl.disabled = true;
+          if (errContainer) errContainer.innerHTML = '<div style="color: #34D399; font-size: 11px; margin-top: 4px;">✅ Tạo âm thanh AI thành công!</div>';
+        } else {
+          if (retryBtn) {
+            retryBtn.disabled = false;
+            retryBtn.innerHTML = '❌ Thử lại';
+          }
+          if (errContainer) {
+            errContainer.innerHTML = `<div style="color: #F87171; font-size: 11px; margin-top: 4px;">❌ Lỗi: ${escapeHtml(updatedSeg.tts_error || 'Thất bại')}</div>`;
+          }
         }
       }
     });
@@ -914,8 +1258,15 @@ async function retryAllFailedSegments() {
 
 async function resumeDubbingRender() {
   if (!state.currentJobId) return;
+  if (el.btnSkipFailedAndRender) {
+    el.btnSkipFailedAndRender.disabled = true;
+    el.btnSkipFailedAndRender.textContent = 'Đang tiếp tục Render...';
+  }
   if (el.failedReviewContainer) el.failedReviewContainer.style.display = 'none';
   el.statusMsg.textContent = 'Đang tiếp tục hòa trộn âm thanh & Render Video...';
+  appendLog('[HỆ THỐNG] Bắt đầu tiếp tục render video và bỏ qua các câu lỗi...');
+
+  connectWebSocket(state.currentJobId);
 
   try {
     const res = await fetch('/api/resume_dubbing_render', {
@@ -923,12 +1274,29 @@ async function resumeDubbingRender() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ job_id: state.currentJobId, skip_failed: true }),
     });
+    if (!res.ok) {
+      const errText = await res.text();
+      let errMsg = 'Không thể tiếp tục render';
+      try {
+        const errJson = JSON.parse(errText);
+        errMsg = errJson.detail || errMsg;
+      } catch (e) {
+        errMsg = errText || errMsg;
+      }
+      throw new Error(errMsg);
+    }
     const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || 'Không thể tiếp tục render');
-    appendLog('[HỆ THỐNG] Đã kích hoạt giai đoạn Render Video.');
+    appendLog('[HỆ THỐNG] Đã kích hoạt thành công giai đoạn Render Video.');
   } catch (err) {
     appendLog(`[LỖI] ${err.message}`);
     el.statusMsg.textContent = `Lỗi render: ${err.message}`;
+    if (el.btnSkipFailedAndRender) {
+      el.btnSkipFailedAndRender.disabled = false;
+      el.btnSkipFailedAndRender.innerHTML = `
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19"></line></svg>
+        Bỏ qua & Tiếp tục Render Video
+      `;
+    }
   }
 }
 
@@ -988,7 +1356,7 @@ function checkAndRestoreActiveJob() {
       }
       state.currentJobId = savedJobId;
 
-      if (job.status === 'running' || job.status === 'started') {
+      if (job.status === 'running' || job.status === 'started' || job.status === 'needs_review') {
         if (el.floatingJobPill) {
           el.floatingJobPill.style.display = 'flex';
           el.floatingJobPill.classList.remove('completed');
@@ -1000,31 +1368,9 @@ function checkAndRestoreActiveJob() {
         if (el.floatingJobTitle) el.floatingJobTitle.textContent = job.message || 'Đang xử lý lồng tiếng...';
         if (el.floatingJobPct) el.floatingJobPct.textContent = `${Math.round(job.percent || 0)}%`;
         connectWebSocket(savedJobId);
+        handleJobUpdate(job);
       } else if (job.status === 'completed') {
-        if (el.floatingJobPill) {
-          el.floatingJobPill.style.display = 'flex';
-          el.floatingJobPill.classList.add('completed');
-        }
-        if (el.floatingSpinner) {
-          el.floatingSpinner.classList.add('completed');
-          el.floatingSpinner.textContent = '✅';
-        }
-        if (el.floatingJobTitle) el.floatingJobTitle.textContent = '🎉 Đã hoàn tất! Nhấn để tải về.';
-        if (el.floatingJobPct) el.floatingJobPct.textContent = '100%';
-
-        if (job.result && job.result.timeline) {
-          updateSubtitlesFromTimeline(job.result.timeline);
-        }
-
-        if (job.output_url) {
-          el.btnDownloadResult.style.display = 'inline-flex';
-          el.btnDownloadResult.onclick = () => window.open(job.output_url, '_blank');
-          loadVideoIntoPlayer(job.output_url);
-        }
-        if (job.output_srt_url && el.btnDownloadSrt) {
-          el.btnDownloadSrt.style.display = 'inline-flex';
-          el.btnDownloadSrt.onclick = () => window.open(job.output_srt_url, '_blank');
-        }
+        handleJobUpdate(job);
       }
     })
     .catch(() => {});

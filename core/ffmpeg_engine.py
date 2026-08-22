@@ -175,7 +175,7 @@ def get_best_video_encoder_params(target_fps: float) -> Tuple[str, List[str]]:
             ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=s=640x360:d=0.2:r=30", "-c:v", "h264_nvenc", "-pix_fmt", "yuv420p", "-f", "null", "-"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=3,
+            timeout=10,
         )
         if res.returncode == 0:
             params = ["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "23", "-b:v", "0", "-pix_fmt", "yuv420p"]
@@ -184,8 +184,8 @@ def get_best_video_encoder_params(target_fps: float) -> Tuple[str, List[str]]:
     except Exception:
         pass
 
-    # Fallback to libx264 ultrafast
-    params = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22", "-pix_fmt", "yuv420p"]
+    # Fallback to libx264 ultrafast (use all CPU threads)
+    params = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22", "-threads", "0", "-pix_fmt", "yuv420p"]
     _GPU_ENCODER_PARAMS = ("libx264", params)
     return "libx264", params + ["-r", str(target_fps)]
 
@@ -281,6 +281,11 @@ class FFmpegDubbingEngine:
         def task_gen_tts(seg: TimelineSegment):
             nonlocal completed_tts
             audio_file = audio_dir / f"audio_seg_{seg.seg_id:04d}.mp3"
+            cached_path = self.tts_client.get_cached_audio_path(seg.text_dub, voice, voice_rate)
+            is_from_cache = bool(
+                (audio_file.exists() and audio_file.stat().st_size > 500)
+                or cached_path
+            )
 
             try:
                 # Reuse valid cached audio if available
@@ -312,10 +317,11 @@ class FFmpegDubbingEngine:
 
             completed_tts += 1
             pct = 10.0 + (completed_tts / max(1, total_dubs)) * 35.0
+            cache_tag = "⚡ [Cache 0s]" if is_from_cache else "🎙️ [Tải CapCut]"
             report(
                 pct,
                 "tts",
-                f"Đã xử lý {completed_tts}/{total_dubs} audio: \"{seg.text_dub[:25]}...\" ({seg.sync_desc})",
+                f"{cache_tag} Đã nạp {completed_tts}/{total_dubs} audio: \"{seg.text_dub[:25]}...\" ({seg.sync_desc})",
                 {
                     "seg_id": seg.seg_id,
                     "ratio": seg.ratio,
@@ -325,6 +331,7 @@ class FFmpegDubbingEngine:
                     "sync_desc": seg.sync_desc,
                     "is_failed": seg.is_failed,
                     "tts_error": seg.tts_error,
+                    "is_cached": is_from_cache,
                 },
             )
             return seg
@@ -480,130 +487,134 @@ class FFmpegDubbingEngine:
         has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
         video_slices = coalesce_timeline_slices(timeline_segs) if has_video_speed_change else []
 
-        # ---------------------------------------------------------------------
-        # Step 3.1: Render AI voice segments in parallel
-        # (Instant 0s pure-Python silence for gaps, lightweight MP3 filter for dubs)
-        # ---------------------------------------------------------------------
-        report(45.0, "audio_render", f"Đang đồng bộ hóa {total_segs} đoạn giọng đọc AI...")
-        completed_auds = 0
-
-        def task_render_voice_seg(seg: TimelineSegment) -> str:
-            nonlocal completed_auds
-            out_aud_path = seg_dir / f"voice_seg_{seg.seg_id:04d}.wav"
-            seg.output_segment_path = str(out_aud_path)
-
-            self._render_single_voice_segment(
-                seg=seg,
-                output_path=out_aud_path,
-            )
-
-            completed_auds += 1
-            if completed_auds % 25 == 0 or completed_auds == total_segs:
-                pct = 45.0 + (completed_auds / max(1, total_segs)) * 25.0
-                report(
-                    pct,
-                    "audio_render",
-                    f"Đã chuẩn bị giọng đọc AI {completed_auds}/{total_segs} [{seg.seg_type.upper()}] ({seg.sync_desc})",
-                    {"seg_id": seg.seg_id, "seg_type": seg.seg_type, "sync_mode": seg.sync_mode},
-                )
-            return str(out_aud_path)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(self.num_workers, 32))) as executor:
-            futures = [executor.submit(task_render_voice_seg, seg) for seg in timeline_segs]
-            for f in concurrent.futures.as_completed(futures):
-                f.result()
-
-        # Concat all voice segments into full AI voice track
-        report(70.0, "concat_audio", "Đang ghép nối toàn bộ track giọng đọc AI...")
-        concat_list_path = work_p / "concat_voice_list.txt"
-        with open(concat_list_path, "w", encoding="utf-8") as f:
-            for seg in timeline_segs:
-                if seg.output_segment_path and os.path.exists(seg.output_segment_path):
-                    safe_path = Path(seg.output_segment_path).resolve().as_posix()
-                    f.write(f"file '{safe_path}'\n")
-
         full_voice_path = work_p / "full_voice_ai.wav"
-        concat_voice_cmd = [
-            "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_list_path),
-            "-c:a", "pcm_s16le",
-            str(full_voice_path),
-        ]
-        subprocess.run(concat_voice_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
-
-        # ---------------------------------------------------------------------
-        # Step 3.2: Extract & synchronize background audio track (100% frame-accurate)
-        # ---------------------------------------------------------------------
         full_audio_path = work_p / "full_dubbed_audio.wav"
 
-        if has_orig_audio:
-            vol_pct = int(self.orig_volume * 100)
-            report(75.0, "audio_render", f"Đang đồng bộ hóa track âm thanh nền ({vol_pct}%) theo dòng thời gian...")
-            bg_audio_path = work_p / "full_bg_audio.wav"
+        # Check if full mixed audio is already rendered and ready
+        if full_audio_path.exists() and full_audio_path.stat().st_size > 1000:
+            report(78.0, "audio_render", "⚡ Tái sử dụng track âm thanh tổng thể đã ghép nối hoàn tất (Chạy thẳng sang Render Video)...")
+        else:
+            # ---------------------------------------------------------------------
+            # Step 3.1: Render AI voice segments in parallel
+            # ---------------------------------------------------------------------
+            if not (full_voice_path.exists() and full_voice_path.stat().st_size > 1000):
+                report(45.0, "audio_render", f"Đang đồng bộ hóa {total_segs} đoạn giọng đọc AI...")
+                completed_auds = 0
 
-            if not has_video_speed_change:
-                # Fast 1-pass extraction for 1.0x constant speed
-                extract_bg_cmd = [
-                    "ffmpeg", "-y",
-                    "-i", str(video_p),
-                    "-vn",
-                    "-af", f"volume={self.orig_volume:.4f},aresample=48000:async=1",
-                    "-c:a", "pcm_s16le",
-                    "-ar", "48000",
-                    "-ac", "2",
-                    str(bg_audio_path),
-                ]
-                subprocess.run(extract_bg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
-            else:
-                # Synchronize background audio slices matching the exact stretched video slices
-                bg_slice_dir = work_p / "bg_slices"
-                bg_slice_dir.mkdir(parents=True, exist_ok=True)
-                bg_slice_files: List[Path] = [bg_slice_dir / f"bg_slice_{s.slice_id:04d}.wav" for s in video_slices]
+                def task_render_voice_seg(seg: TimelineSegment) -> str:
+                    nonlocal completed_auds
+                    out_aud_path = seg_dir / f"voice_seg_{seg.seg_id:04d}.wav"
+                    seg.output_segment_path = str(out_aud_path)
 
-                def task_render_bg_slice(s: VideoSlice):
-                    out_f = bg_slice_dir / f"bg_slice_{s.slice_id:04d}.wav"
-                    self._render_bg_audio_slice(video_p, s, out_f)
-                    return out_f
+                    self._render_single_voice_segment(
+                        seg=seg,
+                        output_path=out_aud_path,
+                    )
 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(self.num_workers, 16))) as executor:
-                    futures = [executor.submit(task_render_bg_slice, s) for s in video_slices]
+                    completed_auds += 1
+                    if completed_auds % 25 == 0 or completed_auds == total_segs:
+                        pct = 45.0 + (completed_auds / max(1, total_segs)) * 25.0
+                        report(
+                            pct,
+                            "audio_render",
+                            f"Đã chuẩn bị giọng đọc AI {completed_auds}/{total_segs} [{seg.seg_type.upper()}] ({seg.sync_desc})",
+                            {"seg_id": seg.seg_id, "seg_type": seg.seg_type, "sync_mode": seg.sync_mode},
+                        )
+                    return str(out_aud_path)
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(self.num_workers, 32))) as executor:
+                    futures = [executor.submit(task_render_voice_seg, seg) for seg in timeline_segs]
                     for f in concurrent.futures.as_completed(futures):
                         f.result()
 
-                concat_bg_list = work_p / "concat_bg_slices.txt"
-                with open(concat_bg_list, "w", encoding="utf-8") as f:
-                    for bf in bg_slice_files:
-                        if bf.exists():
-                            safe_p = Path(bf).resolve().as_posix()
-                            f.write(f"file '{safe_p}'\n")
+                # Concat all voice segments into full AI voice track
+                report(70.0, "concat_audio", "Đang ghép nối toàn bộ track giọng đọc AI...")
+                concat_list_path = work_p / "concat_voice_list.txt"
+                with open(concat_list_path, "w", encoding="utf-8") as f:
+                    for seg in timeline_segs:
+                        if seg.output_segment_path and os.path.exists(seg.output_segment_path):
+                            safe_path = Path(seg.output_segment_path).resolve().as_posix()
+                            f.write(f"file '{safe_path}'\n")
 
-                concat_bg_cmd = [
+                concat_voice_cmd = [
                     "ffmpeg", "-y",
                     "-f", "concat",
                     "-safe", "0",
-                    "-i", str(concat_bg_list),
+                    "-i", str(concat_list_path),
                     "-c:a", "pcm_s16le",
-                    str(bg_audio_path),
+                    str(full_voice_path),
                 ]
-                subprocess.run(concat_bg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
+                subprocess.run(concat_voice_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
+            else:
+                report(70.0, "concat_audio", "⚡ Tái sử dụng track giọng đọc AI đã ghép nối sẵn...")
 
-            # Mix lowered & synced background track + AI voice track
-            mix_cmd = [
-                "ffmpeg", "-y",
-                "-i", str(bg_audio_path),
-                "-i", str(full_voice_path),
-                "-filter_complex", "amix=inputs=2:duration=first:dropout_transition=0",
-                "-c:a", "pcm_s16le",
-                "-ar", "48000",
-                "-ac", "2",
-                str(full_audio_path),
-            ]
-            subprocess.run(mix_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
-        else:
-            # If no original audio or orig_volume == 0, full audio track is directly the full voice track
-            full_audio_path = full_voice_path
+            # ---------------------------------------------------------------------
+            # Step 3.2: Extract & synchronize background audio track (100% frame-accurate)
+            # ---------------------------------------------------------------------
+            if has_orig_audio:
+                vol_pct = int(self.orig_volume * 100)
+                report(75.0, "audio_render", f"Đang đồng bộ hóa track âm thanh nền ({vol_pct}%) theo dòng thời gian...")
+                bg_audio_path = work_p / "full_bg_audio.wav"
+
+                if not (bg_audio_path.exists() and bg_audio_path.stat().st_size > 1000):
+                    if not has_video_speed_change:
+                        extract_bg_cmd = [
+                            "ffmpeg", "-y",
+                            "-i", str(video_p),
+                            "-vn",
+                            "-af", f"volume={self.orig_volume:.4f},aresample=48000:async=1",
+                            "-c:a", "pcm_s16le",
+                            "-ar", "48000",
+                            "-ac", "2",
+                            str(bg_audio_path),
+                        ]
+                        subprocess.run(extract_bg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
+                    else:
+                        bg_slice_dir = work_p / "bg_slices"
+                        bg_slice_dir.mkdir(parents=True, exist_ok=True)
+                        bg_slice_files: List[Path] = [bg_slice_dir / f"bg_slice_{s.slice_id:04d}.wav" for s in video_slices]
+
+                        def task_render_bg_slice(s: VideoSlice):
+                            out_f = bg_slice_dir / f"bg_slice_{s.slice_id:04d}.wav"
+                            self._render_bg_audio_slice(video_p, s, out_f)
+                            return out_f
+
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(self.num_workers, 16))) as executor:
+                            futures = [executor.submit(task_render_bg_slice, s) for s in video_slices]
+                            for f in concurrent.futures.as_completed(futures):
+                                f.result()
+
+                        concat_bg_list = work_p / "concat_bg_slices.txt"
+                        with open(concat_bg_list, "w", encoding="utf-8") as f:
+                            for bf in bg_slice_files:
+                                if bf.exists():
+                                    safe_p = Path(bf).resolve().as_posix()
+                                    f.write(f"file '{safe_p}'\n")
+
+                        concat_bg_cmd = [
+                            "ffmpeg", "-y",
+                            "-f", "concat",
+                            "-safe", "0",
+                            "-i", str(concat_bg_list),
+                            "-c:a", "pcm_s16le",
+                            str(bg_audio_path),
+                        ]
+                        subprocess.run(concat_bg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
+
+                # Mix lowered & synced background track + AI voice track
+                mix_cmd = [
+                    "ffmpeg", "-y",
+                    "-i", str(bg_audio_path),
+                    "-i", str(full_voice_path),
+                    "-filter_complex", "amix=inputs=2:duration=first:dropout_transition=0",
+                    "-c:a", "pcm_s16le",
+                    "-ar", "48000",
+                    "-ac", "2",
+                    str(full_audio_path),
+                ]
+                subprocess.run(mix_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
+            else:
+                full_audio_path = full_voice_path
 
         # ---------------------------------------------------------------------
         # Step 4: High-Speed Timeline Video Pipeline
@@ -638,8 +649,11 @@ class FFmpegDubbingEngine:
             # Build in-graph filter script for the coalesced slices (only ~20-50 branches, 100% frame-accurate sync!)
             filter_lines = []
             concat_tags = []
+            total_target_dur = 0.0
             for i, v_slice in enumerate(video_slices):
                 pts_factor = 1.0 / max(0.1, v_slice.speed)
+                slice_dur = v_slice.end_sec - v_slice.start_sec
+                total_target_dur += (slice_dur * pts_factor)
                 if abs(pts_factor - 1.0) < 0.001:
                     filter_lines.append(f"[0:v]trim=start={v_slice.start_sec:.3f}:end={v_slice.end_sec:.3f},setpts=PTS-STARTPTS[v{i}];")
                 else:
@@ -661,11 +675,61 @@ class FFmpegDubbingEngine:
                 "-c:a", "aac",
                 "-b:a", "192k",
                 "-movflags", "+faststart",
+                "-progress", "pipe:1",
+                "-nostats",
                 str(out_p),
             ]
 
-            res = subprocess.run(single_pass_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-            if res.returncode != 0:
+            proc = subprocess.Popen(
+                single_pass_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="replace",
+                bufsize=1,
+            )
+
+            last_report_t = 0.0
+            cur_sec = 0.0
+            fps_str = "0"
+            frame_str = "0"
+            if proc.stdout:
+                for line in proc.stdout:
+                    l_str = line.strip()
+                    if l_str.startswith("out_time_us="):
+                        try:
+                            cur_sec = int(l_str.split("=")[1]) / 1_000_000.0
+                        except Exception:
+                            pass
+                    elif l_str.startswith("out_time="):
+                        parts = l_str.split("=")[1].split(":")
+                        if len(parts) == 3:
+                            try:
+                                cur_sec = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+                            except Exception:
+                                pass
+                    elif l_str.startswith("fps="):
+                        fps_str = l_str.split("=")[1].strip()
+                    elif l_str.startswith("frame="):
+                        frame_str = l_str.split("=")[1].strip()
+                    elif l_str.startswith("progress="):
+                        now_t = time.time()
+                        if now_t - last_report_t >= 0.5 or l_str == "progress=end":
+                            last_report_t = now_t
+                            if total_target_dur > 0:
+                                ratio = min(1.0, max(0.0, cur_sec / total_target_dur))
+                                pct = 80.0 + ratio * 18.0
+                                m_cur, s_cur = divmod(int(cur_sec), 60)
+                                m_tot, s_tot = divmod(int(total_target_dur), 60)
+                                report(
+                                    pct,
+                                    "video_render",
+                                    f"🎬 Đang Render Video: {pct:.1f}% | Khung hình: {frame_str} ({fps_str} fps) | Thời gian: {m_cur:02d}:{s_cur:02d} / {m_tot:02d}:{s_tot:02d}",
+                                    {"cur_sec": cur_sec, "total_sec": total_target_dur, "fps": fps_str, "frame": frame_str},
+                                )
+
+            proc.wait()
+            if proc.returncode != 0:
                 report(85.0, "video_render", "GPU bận, chuyển sang chế độ CPU Ultrafast Single-Pass...")
                 cpu_v_params = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22", "-pix_fmt", "yuv420p", "-r", str(target_fps)]
                 cpu_cmd = [
@@ -679,11 +743,49 @@ class FFmpegDubbingEngine:
                     "-c:a", "aac",
                     "-b:a", "192k",
                     "-movflags", "+faststart",
+                    "-progress", "pipe:1",
+                    "-nostats",
                     str(out_p),
                 ]
-                cpu_res = subprocess.run(cpu_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-                if cpu_res.returncode != 0:
-                    raise RuntimeError(f"Single-Pass Video Render failed: {cpu_res.stderr.strip() or 'Unknown error'}")
+                cpu_proc = subprocess.Popen(
+                    cpu_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    errors="replace",
+                    bufsize=1,
+                )
+                if cpu_proc.stdout:
+                    for line in cpu_proc.stdout:
+                        l_str = line.strip()
+                        if l_str.startswith("out_time_us="):
+                            try:
+                                cur_sec = int(l_str.split("=")[1]) / 1_000_000.0
+                            except Exception:
+                                pass
+                        elif l_str.startswith("fps="):
+                            fps_str = l_str.split("=")[1].strip()
+                        elif l_str.startswith("frame="):
+                            frame_str = l_str.split("=")[1].strip()
+                        elif l_str.startswith("progress="):
+                            now_t = time.time()
+                            if now_t - last_report_t >= 0.5 or l_str == "progress=end":
+                                last_report_t = now_t
+                                if total_target_dur > 0:
+                                    ratio = min(1.0, max(0.0, cur_sec / total_target_dur))
+                                    pct = 85.0 + ratio * 13.0
+                                    m_cur, s_cur = divmod(int(cur_sec), 60)
+                                    m_tot, s_tot = divmod(int(total_target_dur), 60)
+                                    report(
+                                        pct,
+                                        "video_render",
+                                        f"🎬 Đang Render Video CPU: {pct:.1f}% | Khung hình: {frame_str} ({fps_str} fps) | Thời gian: {m_cur:02d}:{s_cur:02d} / {m_tot:02d}:{s_tot:02d}",
+                                        {"cur_sec": cur_sec, "total_sec": total_target_dur, "fps": fps_str, "frame": frame_str},
+                                    )
+                cpu_proc.wait()
+                if cpu_proc.returncode != 0:
+                    err_msg = cpu_proc.stderr.read() if cpu_proc.stderr else "Unknown error"
+                    raise RuntimeError(f"Single-Pass Video Render failed: {err_msg}")
 
         # Export synchronized SRT file alongside final MP4
         out_srt_p = out_p.with_suffix(".srt")

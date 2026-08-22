@@ -30,19 +30,28 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from core.ffmpeg_engine import FFmpegDubbingEngine, get_video_metadata
-from core.srt_parser import SRTParser, SubtitleItem
+from core.project_manager import ProjectManager
+from core.srt_parser import SRTParser, SubtitleItem, TimelineSegment
 from core.tts_client import CapCutTTSClient, VoiceCatalog
 
 BASE_DIR = Path(__file__).parent.resolve()
 TEMP_DIR = BASE_DIR / "temp"
 UPLOADS_DIR = TEMP_DIR / "uploads"
 OUTPUTS_DIR = TEMP_DIR / "outputs"
+PROJECTS_DIR = TEMP_DIR / "projects"
+TTS_CACHE_DIR = TEMP_DIR / "tts_cache"
 STATIC_DIR = BASE_DIR / "static"
 
 TEMP_DIR.mkdir(exist_ok=True)
 UPLOADS_DIR.mkdir(exist_ok=True)
 OUTPUTS_DIR.mkdir(exist_ok=True)
+PROJECTS_DIR.mkdir(exist_ok=True)
+TTS_CACHE_DIR.mkdir(exist_ok=True)
 STATIC_DIR.mkdir(exist_ok=True)
+
+tts_client = CapCutTTSClient(cache_dir=TTS_CACHE_DIR)
+voice_catalog = VoiceCatalog()
+project_manager = ProjectManager(base_dir=BASE_DIR, tts_client=tts_client)
 
 app = FastAPI(title="AI Dubbing & Video Sync Studio")
 
@@ -61,9 +70,25 @@ app.mount("/temp", StaticFiles(directory=str(TEMP_DIR)), name="temp")
 jobs_state: Dict[str, Dict[str, Any]] = {}
 active_connections: Dict[str, List[WebSocket]] = {}
 job_locks = threading.Lock()
+MAIN_EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
-tts_client = CapCutTTSClient()
-voice_catalog = VoiceCatalog()
+
+def get_job_public_state(raw_job: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract strictly JSON-serializable status fields for API & WebSocket clients."""
+    return {
+        "job_id": raw_job.get("job_id"),
+        "status": raw_job.get("status"),
+        "percent": raw_job.get("percent", 0.0),
+        "stage": raw_job.get("stage"),
+        "message": raw_job.get("message"),
+        "output_path": raw_job.get("output_path"),
+        "output_url": raw_job.get("output_url"),
+        "output_srt_url": raw_job.get("output_srt_url"),
+        "error": raw_job.get("error"),
+        "data": raw_job.get("data", {}),
+        "failed_segments": raw_job.get("failed_segments", []),
+        "result": raw_job.get("result"),
+    }
 
 
 class ConnectionManager:
@@ -83,7 +108,7 @@ class ConnectionManager:
     async def broadcast(job_id: str, message: Dict[str, Any]):
         if job_id in active_connections:
             dead_sockets = []
-            for ws in active_connections[job_id]:
+            for ws in list(active_connections[job_id]):
                 try:
                     await ws.send_json(message)
                 except Exception:
@@ -94,6 +119,18 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+
+def broadcast_sync(job_id: str, message: Dict[str, Any]):
+    """Thread-safe WebSocket broadcaster called from background worker threads."""
+    if MAIN_EVENT_LOOP and MAIN_EVENT_LOOP.is_running():
+        asyncio.run_coroutine_threadsafe(manager.broadcast(job_id, message), MAIN_EVENT_LOOP)
+    else:
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(manager.broadcast(job_id, message))
+        except RuntimeError:
+            pass
 
 
 @app.get("/")
@@ -143,13 +180,68 @@ async def preview_tts(req: PreviewTTSRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/projects")
+async def get_projects():
+    """List saved projects with cache completion percentage."""
+    return {
+        "projects": project_manager.list_projects(),
+        "cache_stats": tts_client.get_cache_stats(),
+    }
+
+
+class LoadProjectRequest(BaseModel):
+    project_id: str
+
+
+@app.post("/api/projects/load")
+async def load_project(req: LoadProjectRequest):
+    """Load a specific project and return full metadata and subtitle cache indicators."""
+    project_data = project_manager.load_project(req.project_id)
+    if not project_data:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project_data
+
+
+class DeleteProjectRequest(BaseModel):
+    project_id: str
+
+
+@app.post("/api/projects/delete")
+async def delete_project(req: DeleteProjectRequest):
+    """Delete a saved project."""
+    success = project_manager.delete_project(req.project_id)
+    return {"success": success, "project_id": req.project_id}
+
+
+class CheckCacheRequest(BaseModel):
+    subtitles: List[Dict[str, Any]]
+    voice: Optional[str] = "BV421_vivn_streaming"
+    voice_rate: Optional[str] = "1.0"
+
+
+@app.post("/api/check_cache")
+async def check_cache(req: CheckCacheRequest):
+    """Check how many subtitles are already cached in persistent TTS cache."""
+    return project_manager.check_subtitles_cache(
+        subtitles=req.subtitles,
+        voice=req.voice or "BV421_vivn_streaming",
+        voice_rate=req.voice_rate or "1.0",
+    )
+
+
+@app.get("/api/cache_stats")
+async def get_cache_stats():
+    """Get persistent TTS cache statistics."""
+    return tts_client.get_cache_stats()
+
+
 @app.post("/api/upload_files")
 async def upload_files(
     video: Optional[UploadFile] = File(None),
     srt_dub: Optional[UploadFile] = File(None),
     srt_orig: Optional[UploadFile] = File(None),
 ):
-    """Upload video and subtitle files."""
+    """Upload video and subtitle files and automatically index/detect cache."""
     session_id = uuid.uuid4().hex[:8]
     session_dir = UPLOADS_DIR / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -196,14 +288,36 @@ async def upload_files(
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to parse SRT: {e}")
 
+    # Create persistent project entry
+    if video_path or srt_dub_path:
+        project_manager.create_or_update_project(
+            project_id=session_id,
+            name=Path(video_path).stem if video_path else "Dự án mới",
+            video_path=video_path,
+            srt_dub_path=srt_dub_path,
+            srt_orig_path=srt_orig_path,
+            video_meta=video_meta,
+            subtitles=subtitles,
+            status="ready",
+        )
+
+    # Check cache status for subtitles
+    cache_info = project_manager.check_subtitles_cache(subtitles, "BV421_vivn_streaming", "1.0")
+
     return {
         "session_id": session_id,
+        "project_id": session_id,
         "video_path": video_path,
         "video_url": f"/temp/uploads/{session_id}/{Path(video_path).name}" if video_path else None,
         "video_meta": video_meta,
         "srt_dub_path": srt_dub_path,
         "srt_orig_path": srt_orig_path,
-        "subtitles": subtitles,
+        "subtitles": cache_info.get("subtitles", subtitles),
+        "cache_info": {
+            "cached_count": cache_info.get("cached_count", 0),
+            "missing_count": cache_info.get("missing_count", len(subtitles)),
+            "cached_percent": cache_info.get("cached_percent", 0.0),
+        },
     }
 
 
@@ -277,9 +391,6 @@ async def start_dubbing(req: StartDubbingRequest):
                 num_workers=req.num_workers if req.num_workers is not None else 50,
             )
 
-            # Thread-safe async broadcaster loop
-            loop = asyncio.new_event_loop()
-
             def on_progress(payload: Dict[str, Any]):
                 with job_locks:
                     jobs_state[job_id]["percent"] = payload["percent"]
@@ -287,14 +398,7 @@ async def start_dubbing(req: StartDubbingRequest):
                     jobs_state[job_id]["message"] = payload["message"]
                     jobs_state[job_id]["data"] = payload.get("data", {})
 
-                # Broadcast via WebSocket
-                async def send_ws():
-                    await manager.broadcast(job_id, payload)
-
-                try:
-                    loop.run_until_complete(send_ws())
-                except Exception:
-                    pass
+                broadcast_sync(job_id, payload)
 
             result = engine.process_dubbing_pipeline(
                 video_path=req.video_path,
@@ -334,24 +438,17 @@ async def start_dubbing(req: StartDubbingRequest):
                 jobs_state[job_id]["output_srt_url"] = srt_url
                 jobs_state[job_id]["result"] = result
 
-            async def final_broadcast():
-                await manager.broadcast(
-                    job_id,
-                    {
-                        "percent": 100.0,
-                        "stage": "completed",
-                        "message": "Hoàn tất! Video & Phụ đề SRT đã sẵn sàng tải về.",
-                        "output_url": video_url,
-                        "output_srt_url": srt_url,
-                        "result": result,
-                    },
-                )
-
-            try:
-                loop.run_until_complete(final_broadcast())
-                loop.close()
-            except Exception:
-                pass
+            broadcast_sync(
+                job_id,
+                {
+                    "percent": 100.0,
+                    "stage": "completed",
+                    "message": "Hoàn tất! Video & Phụ đề SRT đã sẵn sàng tải về.",
+                    "output_url": video_url,
+                    "output_srt_url": srt_url,
+                    "result": result,
+                },
+            )
 
         except Exception as e:
             with job_locks:
@@ -359,23 +456,15 @@ async def start_dubbing(req: StartDubbingRequest):
                 jobs_state[job_id]["error"] = str(e)
                 jobs_state[job_id]["message"] = f"Lỗi: {e}"
 
-            async def error_broadcast():
-                await manager.broadcast(
-                    job_id,
-                    {
-                        "percent": jobs_state[job_id]["percent"],
-                        "stage": "failed",
-                        "error": str(e),
-                        "message": f"Lỗi trong quá trình xử lý: {e}",
-                    },
-                )
-
-            try:
-                err_loop = asyncio.new_event_loop()
-                err_loop.run_until_complete(error_broadcast())
-                err_loop.close()
-            except Exception:
-                pass
+            broadcast_sync(
+                job_id,
+                {
+                    "percent": jobs_state[job_id].get("percent", 0.0),
+                    "stage": "failed",
+                    "error": str(e),
+                    "message": f"Lỗi trong quá trình xử lý: {e}",
+                },
+            )
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
@@ -384,10 +473,10 @@ async def start_dubbing(req: StartDubbingRequest):
 
 
 class RetrySegmentsRequest(BaseModel):
-    job_id: str
+    job_id: Optional[str] = None
     segments: List[Dict[str, Any]]
-    voice: Optional[str] = None
-    voice_rate: Optional[str] = None
+    voice: Optional[str] = "BV421_vivn_streaming"
+    voice_rate: Optional[str] = "1.0"
 
 
 class ResumeRenderRequest(BaseModel):
@@ -397,58 +486,128 @@ class ResumeRenderRequest(BaseModel):
 
 @app.post("/api/retry_tts_segments")
 async def retry_tts_segments(req: RetrySegmentsRequest):
-    """Re-generate TTS for specific failed segments."""
+    """Re-generate TTS for specific failed segments with 100% standalone reliability and permanent cache saving."""
+    job_id = req.job_id or uuid.uuid4().hex[:10]
+    work_dir = TEMP_DIR / f"job_{job_id}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    audio_dir = work_dir / "audios"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+
     with job_locks:
-        if req.job_id not in jobs_state:
-            raise HTTPException(status_code=404, detail="Job not found")
-        job = jobs_state[req.job_id]
-        engine: FFmpegDubbingEngine = job.get("engine")
-        work_dir = Path(job.get("work_dir")) if job.get("work_dir") else None
+        if job_id not in jobs_state:
+            jobs_state[job_id] = {
+                "job_id": job_id,
+                "status": "needs_review",
+                "work_dir": str(work_dir),
+                "timeline": [],
+                "failed_segments": [],
+            }
+        job = jobs_state[job_id]
+        engine: Optional[FFmpegDubbingEngine] = job.get("engine")
+        if not engine:
+            engine = FFmpegDubbingEngine(tts_client=tts_client)
+            job["engine"] = engine
         timeline_list = job.get("timeline", [])
 
-    if not engine or not work_dir:
-        raise HTTPException(status_code=400, detail="Job context expired or not initialized")
+    voice = req.voice or "BV421_vivn_streaming"
+    voice_rate = req.voice_rate or "1.0"
+    is_vn_voice = voice.startswith(("BV421", "BV074", "vi_"))
 
     updated = []
     for item in req.segments:
-        seg_id = item["seg_id"]
-        text_dub = item.get("text_dub", "").strip()
-        matching_seg = next((s for s in timeline_list if s.get("seg_id") == seg_id), None)
-        if not matching_seg:
-            continue
+        seg_id = item.get("seg_id", 1)
+        final_text = str(item.get("text_dub", "")).strip()
 
-        seg_obj = TimelineSegment(**matching_seg)
-        try:
-            res_seg = engine.retry_single_tts_segment(
-                seg=seg_obj,
-                text_dub=text_dub or seg_obj.text_dub,
-                work_dir=work_dir,
-                voice=req.voice or "BV421_vivn_streaming",
-                voice_rate=req.voice_rate or "1.0",
-            )
-            for i, s in enumerate(timeline_list):
-                if s.get("seg_id") == seg_id:
-                    timeline_list[i] = res_seg.to_dict()
-                    break
-            updated.append(res_seg.to_dict())
-        except Exception as e:
+        if not final_text:
             updated.append({
                 "seg_id": seg_id,
                 "is_failed": True,
-                "tts_error": str(e),
-                "text_dub": text_dub or seg_obj.text_dub,
+                "tts_error": "Nội dung câu không được để trống!",
+                "text_dub": final_text,
+            })
+            continue
+
+        # Check for Chinese characters with Vietnamese voice
+        has_chinese = any("\u4e00" <= char <= "\u9fff" for char in final_text)
+        if is_vn_voice and has_chinese:
+            updated.append({
+                "seg_id": seg_id,
+                "is_failed": True,
+                "tts_error": "Câu này đang là chữ tiếng Trung, giọng tiếng Việt không đọc được. Vui lòng nhập bản dịch tiếng Việt vào ô trên!",
+                "text_dub": final_text,
+            })
+            continue
+
+        audio_file = audio_dir / f"audio_seg_{seg_id:04d}.mp3"
+        try:
+            # Remove old failed audio if present
+            if audio_file.exists():
+                try:
+                    audio_file.unlink()
+                except Exception:
+                    pass
+
+            # Generate speech directly
+            tts_client.generate_speech_to_file(
+                text=final_text,
+                output_file=audio_file,
+                voice=voice,
+                rate=voice_rate,
+            )
+
+            from core.ffmpeg_engine import get_audio_duration
+            aud_dur = get_audio_duration(audio_file)
+
+            # Save into persistent cache
+            tts_client.save_to_cache(
+                text=final_text,
+                audio_source=audio_file,
+                voice=voice,
+                rate=voice_rate,
+            )
+
+            # Update segment in timeline if present
+            matching_seg = next((s for s in timeline_list if s.get("seg_id") == seg_id), None)
+            if matching_seg:
+                matching_seg["text_dub"] = final_text
+                matching_seg["audio_path"] = str(audio_file)
+                matching_seg["audio_duration_sec"] = round(aud_dur, 3)
+                matching_seg["ratio"] = round(matching_seg.get("duration_sec", 5.0) / max(0.01, aud_dur), 2)
+                matching_seg["tts_error"] = None
+                matching_seg["is_failed"] = False
+                res_dict = matching_seg
+            else:
+                res_dict = {
+                    "seg_id": seg_id,
+                    "text_dub": final_text,
+                    "audio_path": str(audio_file),
+                    "audio_duration_sec": round(aud_dur, 3),
+                    "is_failed": False,
+                    "tts_error": None,
+                }
+
+            updated.append(res_dict)
+
+        except Exception as exc:
+            updated.append({
+                "seg_id": seg_id,
+                "is_failed": True,
+                "tts_error": str(exc),
+                "text_dub": final_text,
             })
 
     with job_locks:
-        jobs_state[req.job_id]["timeline"] = timeline_list
-        jobs_state[req.job_id]["failed_segments"] = [
+        jobs_state[job_id]["timeline"] = timeline_list
+        jobs_state[job_id]["failed_segments"] = [
             s for s in timeline_list if s.get("seg_type") == "dub" and (s.get("is_failed") or not s.get("audio_path"))
         ]
+        remaining = len(jobs_state[job_id]["failed_segments"])
 
     return {
         "status": "ok",
+        "job_id": job_id,
         "updated_segments": updated,
-        "remaining_failed": len(jobs_state[req.job_id]["failed_segments"]),
+        "remaining_failed": remaining,
     }
 
 
@@ -457,23 +616,128 @@ async def resume_dubbing_render(req: ResumeRenderRequest):
     """Resume Step 3 (Audio Mix) and Step 4 (Video Render) after reviewing failed TTS."""
     with job_locks:
         if req.job_id not in jobs_state:
-            raise HTTPException(status_code=404, detail="Job not found")
+            # Try to restore from project_manager
+            proj = project_manager.load_project(req.job_id)
+            if proj:
+                work_p = TEMP_DIR / f"job_{req.job_id}"
+                work_p.mkdir(parents=True, exist_ok=True)
+                out_v = OUTPUTS_DIR / f"dubbed_{req.job_id}.mp4"
+
+                # Parse timeline if needed
+                tl = []
+                if proj.get("srt_dub_path") and Path(proj["srt_dub_path"]).exists():
+                    sub_items = SRTParser.parse_srt_file(proj["srt_dub_path"])
+                    tl_objs = SRTParser.build_timeline_segments(sub_items)
+                    tl = [s.to_dict() for s in tl_objs]
+
+                jobs_state[req.job_id] = {
+                    "job_id": req.job_id,
+                    "status": "needs_review",
+                    "work_dir": str(work_p),
+                    "out_video_path": str(out_v),
+                    "timeline": tl,
+                    "req": {
+                        "video_path": proj.get("video_path"),
+                        "voice": proj.get("voice", "BV421_vivn_streaming"),
+                        "voice_rate": proj.get("voice_rate", "1.0"),
+                    }
+                }
+            else:
+                work_p = TEMP_DIR / f"job_{req.job_id}"
+                if work_p.exists():
+                    jobs_state[req.job_id] = {
+                        "job_id": req.job_id,
+                        "status": "needs_review",
+                        "work_dir": str(work_p),
+                        "out_video_path": str(OUTPUTS_DIR / f"dubbed_{req.job_id}.mp4"),
+                        "timeline": [],
+                    }
+                else:
+                    raise HTTPException(status_code=404, detail="Không tìm thấy tiến trình hoặc dự án để tiếp tục render.")
+
         job = jobs_state[req.job_id]
-        engine: FFmpegDubbingEngine = job.get("engine")
-        work_dir = Path(job.get("work_dir")) if job.get("work_dir") else None
-        out_video_path = Path(job.get("out_video_path")) if job.get("out_video_path") else None
-        video_p = Path(job.get("req").video_path) if job.get("req") else None
+        engine: Optional[FFmpegDubbingEngine] = job.get("engine")
+        work_dir_val = job.get("work_dir") or str(TEMP_DIR / f"job_{req.job_id}")
+        out_video_path_val = job.get("out_video_path") or str(OUTPUTS_DIR / f"dubbed_{req.job_id}.mp4")
+        req_obj = job.get("req")
         timeline_list = job.get("timeline", [])
 
-    if not engine or not work_dir or not out_video_path or not video_p:
-        raise HTTPException(status_code=400, detail="Job context missing or expired")
+    work_dir = Path(work_dir_val)
+    out_video_path = Path(out_video_path_val)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    timeline_objs = [TimelineSegment(**s) for s in timeline_list]
+    video_path_str = None
+    if req_obj:
+        if hasattr(req_obj, "video_path"):
+            video_path_str = req_obj.video_path
+        elif isinstance(req_obj, dict):
+            video_path_str = req_obj.get("video_path")
+
+    if not video_path_str or not Path(video_path_str).exists():
+        # Fallback 1: check project manager
+        try:
+            proj_data = project_manager.load_project(req.job_id)
+            if proj_data and proj_data.get("video_path") and Path(proj_data["video_path"]).exists():
+                video_path_str = proj_data["video_path"]
+        except Exception:
+            pass
+
+    if not video_path_str or not Path(video_path_str).exists():
+        # Fallback 2: look in uploads directory for this job/project
+        upload_job_dir = UPLOADS_DIR / req.job_id
+        if upload_job_dir.exists():
+            for v_ext in ("*.mp4", "*.mkv", "*.mov", "*.avi", "*.webm"):
+                found = list(upload_job_dir.glob(v_ext))
+                if found:
+                    video_path_str = str(found[0])
+                    break
+
+    if not video_path_str or not Path(video_path_str).exists():
+        raise HTTPException(status_code=400, detail="Không tìm thấy file video gốc để tiếp tục render. Vui lòng tải lại video!")
+
+    video_p = Path(video_path_str)
+
+    if not engine:
+        engine = FFmpegDubbingEngine(
+            tts_client=tts_client,
+            min_audio_speed=getattr(req_obj, "min_audio_speed", 0.80) if req_obj else 0.80,
+            max_audio_speed=getattr(req_obj, "max_audio_speed", 1.20) if req_obj else 1.20,
+            min_video_speed=getattr(req_obj, "min_video_speed", 0.50) if req_obj else 0.50,
+            max_video_speed=getattr(req_obj, "max_video_speed", 1.50) if req_obj else 1.50,
+            orig_volume=getattr(req_obj, "orig_volume", 0.15) if req_obj else 0.15,
+            dub_volume=getattr(req_obj, "dub_volume", 1.20) if req_obj else 1.20,
+            num_workers=getattr(req_obj, "num_workers", 50) if req_obj else 50,
+        )
+        with job_locks:
+            jobs_state[req.job_id]["engine"] = engine
+
+    # Convert timeline items to TimelineSegment objects
+    timeline_objs: List[TimelineSegment] = []
+    for s in timeline_list:
+        if isinstance(s, TimelineSegment):
+            timeline_objs.append(s)
+        elif isinstance(s, dict):
+            timeline_objs.append(TimelineSegment(**s))
+
     video_meta = get_video_metadata(video_p)
 
-    def worker_resume():
-        loop = asyncio.new_event_loop()
+    with job_locks:
+        jobs_state[req.job_id]["status"] = "running"
+        jobs_state[req.job_id]["percent"] = 45.0
+        jobs_state[req.job_id]["stage"] = "audio_render"
+        jobs_state[req.job_id]["message"] = "Đang tiếp tục hòa trộn âm thanh & Render Video..."
 
+    broadcast_sync(
+        req.job_id,
+        {
+            "percent": 45.0,
+            "stage": "audio_render",
+            "message": "Đang tiếp tục hòa trộn âm thanh & Render Video...",
+        },
+    )
+
+    def worker_resume():
         def on_progress(payload: Dict[str, Any]):
             with job_locks:
                 jobs_state[req.job_id]["percent"] = payload["percent"]
@@ -481,13 +745,7 @@ async def resume_dubbing_render(req: ResumeRenderRequest):
                 jobs_state[req.job_id]["message"] = payload["message"]
                 jobs_state[req.job_id]["data"] = payload.get("data", {})
 
-            async def send_ws():
-                await manager.broadcast(req.job_id, payload)
-
-            try:
-                loop.run_until_complete(send_ws())
-            except Exception:
-                pass
+            broadcast_sync(req.job_id, payload)
 
         try:
             result = engine.render_remaining_pipeline(
@@ -508,35 +766,39 @@ async def resume_dubbing_render(req: ResumeRenderRequest):
                 jobs_state[req.job_id]["status"] = "completed"
                 jobs_state[req.job_id]["percent"] = 100.0
                 jobs_state[req.job_id]["stage"] = "completed"
+                jobs_state[req.job_id]["message"] = "Hoàn tất! Video & Phụ đề SRT đã sẵn sàng tải về."
                 jobs_state[req.job_id]["output_path"] = str(out_video_path)
                 jobs_state[req.job_id]["output_url"] = video_url
                 jobs_state[req.job_id]["output_srt_url"] = srt_url
                 jobs_state[req.job_id]["result"] = result
 
-            async def final_broadcast():
-                await manager.broadcast(
-                    req.job_id,
-                    {
-                        "percent": 100.0,
-                        "stage": "completed",
-                        "message": "Hoàn tất! Video & Phụ đề SRT đã sẵn sàng tải về.",
-                        "output_url": video_url,
-                        "output_srt_url": srt_url,
-                        "result": result,
-                    },
-                )
-
-            try:
-                loop.run_until_complete(final_broadcast())
-                loop.close()
-            except Exception:
-                pass
+            broadcast_sync(
+                req.job_id,
+                {
+                    "percent": 100.0,
+                    "stage": "completed",
+                    "message": "Hoàn tất! Video & Phụ đề SRT đã sẵn sàng tải về.",
+                    "output_url": video_url,
+                    "output_srt_url": srt_url,
+                    "result": result,
+                },
+            )
 
         except Exception as e:
             with job_locks:
                 jobs_state[req.job_id]["status"] = "failed"
                 jobs_state[req.job_id]["error"] = str(e)
                 jobs_state[req.job_id]["message"] = f"Lỗi render: {e}"
+
+            broadcast_sync(
+                req.job_id,
+                {
+                    "percent": jobs_state[req.job_id].get("percent", 45.0),
+                    "stage": "failed",
+                    "error": str(e),
+                    "message": f"Lỗi trong quá trình render: {e}",
+                },
+            )
 
     t = threading.Thread(target=worker_resume, daemon=True)
     t.start()
@@ -550,7 +812,7 @@ async def get_job_status(job_id: str):
     with job_locks:
         if job_id not in jobs_state:
             raise HTTPException(status_code=404, detail="Job not found")
-        return jobs_state[job_id]
+        return get_job_public_state(jobs_state[job_id])
 
 
 @app.get("/api/download/{job_id}")
@@ -572,8 +834,11 @@ async def download_video(job_id: str):
         )
 
 
-def cleanup_temp_files(max_age_hours: int = 6, clear_all_jobs: bool = False, clear_outputs: bool = False, clear_uploads: bool = True) -> Dict[str, Any]:
-    """Clean up old temporary job folders, uploads cache, preview audio, and temp files."""
+def cleanup_temp_files(max_age_hours: int = 0, clear_all_jobs: bool = True, clear_outputs: bool = False, clear_uploads: bool = True) -> Dict[str, Any]:
+    """
+    Clean up all temporary files, uploads, projects, cache, and intermediate folders EXCEPT the 'outputs/' directory.
+    Outputs folder (exported finished videos & SRTs) is ALWAYS strictly preserved unless clear_outputs=True.
+    """
     now = time.time()
     deleted_count = 0
     freed_bytes = 0
@@ -584,36 +849,16 @@ def cleanup_temp_files(max_age_hours: int = 6, clear_all_jobs: bool = False, cle
     with job_locks:
         active_job_dirs = [f"job_{jid}" for jid, j in jobs_state.items() if j.get("status") == "running"]
 
-    # 1. Clean uploads folder (large video/srt input files)
-    if clear_uploads and UPLOADS_DIR.exists():
-        for upload_item in UPLOADS_DIR.iterdir():
-            try:
-                mtime = upload_item.stat().st_mtime
-                if clear_all_jobs or (now - mtime) > (max_age_hours * 3600):
-                    if upload_item.is_dir():
-                        size = sum(f.stat().st_size for f in upload_item.glob("**/*") if f.is_file())
-                        shutil.rmtree(upload_item, ignore_errors=True)
-                        deleted_count += 1
-                        freed_bytes += size
-                    elif upload_item.is_file():
-                        freed_bytes += upload_item.stat().st_size
-                        upload_item.unlink(missing_ok=True)
-                        deleted_count += 1
-            except Exception:
-                pass
-        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-
-    # 2. Clean temporary directories & files
     for item in TEMP_DIR.iterdir():
+        # NEVER delete outputs directory unless explicitly requested
         if item.name == "outputs" and not clear_outputs:
-            continue
-        if item.name == "uploads":
             continue
 
         try:
             if item.is_dir():
                 if item.name in active_job_dirs:
-                    continue
+                    continue  # Skip currently running job
+                
                 mtime = item.stat().st_mtime
                 if clear_all_jobs or (now - mtime) > (max_age_hours * 3600):
                     size = sum(f.stat().st_size for f in item.glob("**/*") if f.is_file())
@@ -621,7 +866,6 @@ def cleanup_temp_files(max_age_hours: int = 6, clear_all_jobs: bool = False, cle
                     deleted_count += 1
                     freed_bytes += size
             elif item.is_file():
-                # Preview audio or stray mp3/m4a/txt
                 mtime = item.stat().st_mtime
                 if clear_all_jobs or (now - mtime) > (max_age_hours * 3600):
                     freed_bytes += item.stat().st_size
@@ -630,6 +874,13 @@ def cleanup_temp_files(max_age_hours: int = 6, clear_all_jobs: bool = False, cle
         except Exception:
             pass
 
+    # Ensure required base directory structure exists
+    TEMP_DIR.mkdir(exist_ok=True)
+    UPLOADS_DIR.mkdir(exist_ok=True)
+    OUTPUTS_DIR.mkdir(exist_ok=True)
+    PROJECTS_DIR.mkdir(exist_ok=True)
+    TTS_CACHE_DIR.mkdir(exist_ok=True)
+
     return {
         "deleted_count": deleted_count,
         "freed_mb": round(freed_bytes / (1024 * 1024), 2),
@@ -637,32 +888,37 @@ def cleanup_temp_files(max_age_hours: int = 6, clear_all_jobs: bool = False, cle
 
 
 def _background_cleanup_worker():
-    """Periodic background daemon that cleans old temp files every 2 hours."""
+    """Periodic background daemon that cleans old intermediate temp files every 6 hours."""
     while True:
         try:
-            time.sleep(7200)  # Every 2 hours
-            cleanup_temp_files(max_age_hours=6, clear_uploads=True)
+            time.sleep(21600)  # Every 6 hours
+            cleanup_temp_files(max_age_hours=12, clear_all_jobs=False, clear_outputs=False, clear_uploads=True)
         except Exception:
             pass
 
 
 @app.on_event("startup")
 async def on_startup():
-    """Run initial cleanup on server launch and start periodic worker."""
-    cleanup_temp_files(max_age_hours=6, clear_uploads=True)
+    """Run initial cache indexing and start periodic worker."""
+    global MAIN_EVENT_LOOP
+    MAIN_EVENT_LOOP = asyncio.get_running_loop()
+    try:
+        indexed = project_manager.scan_and_index_existing_jobs()
+    except Exception:
+        pass
     t = threading.Thread(target=_background_cleanup_worker, daemon=True)
     t.start()
 
 
 @app.post("/api/cleanup")
-async def api_cleanup(clear_outputs: bool = False, clear_uploads: bool = True):
-    """Manually clear temporary job folders, uploaded files cache, and temp files."""
-    res = cleanup_temp_files(max_age_hours=0, clear_all_jobs=True, clear_outputs=clear_outputs, clear_uploads=clear_uploads)
+async def api_cleanup(clear_outputs: bool = False):
+    """Manually clear all temporary files, cache, uploads, and projects while protecting outputs/."""
+    res = cleanup_temp_files(max_age_hours=0, clear_all_jobs=True, clear_outputs=clear_outputs, clear_uploads=True)
     return {
         "success": True,
         "deleted_count": res["deleted_count"],
         "freed_mb": res["freed_mb"],
-        "message": f"Đã dọn dẹp {res['deleted_count']} mục tạm (bao gồm cả thư mục uploads), giải phóng {res['freed_mb']} MB bộ nhớ!",
+        "message": f"Đã dọn dẹp sạch toàn bộ {res['deleted_count']} mục rác và tệp tạm, giải phóng {res['freed_mb']} MB. (Thư mục video thành phẩm 'outputs' được giữ nguyên an toàn!)",
     }
 
 
@@ -720,9 +976,12 @@ async def ws_progress(websocket: WebSocket, job_id: str):
     await manager.connect(job_id, websocket)
     try:
         # Send current state immediately on connect
+        pub_state = None
         with job_locks:
             if job_id in jobs_state:
-                await websocket.send_json(jobs_state[job_id])
+                pub_state = get_job_public_state(jobs_state[job_id])
+        if pub_state:
+            await websocket.send_json(pub_state)
         while True:
             # Keep alive
             data = await websocket.receive_text()

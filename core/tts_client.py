@@ -3,9 +3,11 @@ High-level CapCut TTS Client with auto-retry, anti-rate-limit device rotation, a
 """
 
 import base64
+import hashlib
 import json
 import os
 import random
+import shutil
 import threading
 import time
 import uuid
@@ -114,6 +116,7 @@ class CapCutTTSClient:
         self,
         device_dict: Optional[Dict[str, Any]] = None,
         catalog_path: Optional[Union[str, Path]] = None,
+        cache_dir: Optional[Union[str, Path]] = None,
     ):
         self.device = deepcopy(DEFAULT_DEVICE)
         if device_dict:
@@ -122,6 +125,11 @@ class CapCutTTSClient:
         self._lock = threading.Lock()
         self.catalog = VoiceCatalog(catalog_path)
         self.session = requests.Session()
+
+        if cache_dir is None:
+            cache_dir = Path(__file__).parent.parent / "temp" / "tts_cache"
+        self.cache_dir = Path(cache_dir).resolve()
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         retry_strategy = Retry(
             total=5,
@@ -132,6 +140,79 @@ class CapCutTTSClient:
         adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=300, pool_maxsize=300)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
+
+    def compute_cache_key(self, text: str, voice: Optional[str] = "BV421_vivn_streaming", rate: str = "1.0") -> str:
+        """Generate deterministic cache key for (voice, rate, normalized_text)."""
+        voice_str = (voice or "BV421_vivn_streaming").strip().lower()
+        try:
+            rate_val = float(rate or 1.0)
+            rate_str = f"{rate_val:.1f}"
+        except Exception:
+            rate_str = str(rate or "1.0").strip()
+        norm_text = " ".join(text.strip().split())
+        raw_key = f"{voice_str}|{rate_str}|{norm_text}"
+        return hashlib.md5(raw_key.encode("utf-8")).hexdigest()
+
+    def get_cached_audio_path(self, text: str, voice: Optional[str] = "BV421_vivn_streaming", rate: str = "1.0") -> Optional[Path]:
+        """Check if audio already exists in persistent TTS cache and is valid (>500 bytes)."""
+        key = self.compute_cache_key(text, voice, rate)
+        cached_file = self.cache_dir / f"{key}.mp3"
+        if cached_file.exists() and cached_file.stat().st_size > 500:
+            return cached_file
+        return None
+
+    def save_to_cache(self, text: str, audio_source: Union[bytes, str, Path], voice: Optional[str] = "BV421_vivn_streaming", rate: str = "1.0") -> Path:
+        """Save raw bytes or existing MP3 file to persistent TTS cache."""
+        key = self.compute_cache_key(text, voice, rate)
+        cached_file = self.cache_dir / f"{key}.mp3"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        if isinstance(audio_source, bytes):
+            cached_file.write_bytes(audio_source)
+        else:
+            src_p = Path(audio_source)
+            if src_p.exists() and src_p.resolve() != cached_file.resolve():
+                shutil.copy2(src_p, cached_file)
+        return cached_file
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get total cached audio files and size in MB."""
+        if not self.cache_dir.exists():
+            return {"total_cached_files": 0, "size_mb": 0.0}
+        files = list(self.cache_dir.glob("*.mp3"))
+        total_size = sum(f.stat().st_size for f in files)
+        return {
+            "total_cached_files": len(files),
+            "size_mb": round(total_size / (1024 * 1024), 2),
+            "cache_dir": str(self.cache_dir),
+        }
+
+    def generate_speech_to_file(
+        self,
+        text: str,
+        output_file: Union[str, Path],
+        voice: Optional[str] = "BV421_vivn_streaming",
+        resource_id: Optional[str] = None,
+        rate: str = "1.0",
+    ) -> str:
+        """Generate audio and save directly to file path with instant persistent cache reuse (0ms)."""
+        out_path = Path(output_file)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # 1. Check persistent global TTS cache first
+        cached_p = self.get_cached_audio_path(text=text, voice=voice, rate=rate)
+        if cached_p:
+            if out_path.resolve() != cached_p.resolve():
+                shutil.copy2(cached_p, out_path)
+            return str(out_path.resolve())
+
+        # 2. If not cached, generate via CapCut API
+        audio_bytes = self.generate_speech(text, voice=voice, resource_id=resource_id, rate=rate)
+
+        # 3. Save to persistent cache and target output
+        self.save_to_cache(text=text, audio_source=audio_bytes, voice=voice, rate=rate)
+        with open(out_path, "wb") as f:
+            f.write(audio_bytes)
+        return str(out_path.resolve())
 
     def randomize_device(self):
         """Randomize device IDs to bypass rate-limits and IP throttling."""
@@ -350,19 +431,3 @@ class CapCutTTSClient:
             return base64.b64decode(task_item["audio"])
 
         raise CapCutError("No audio URL or Base64 data found in API response")
-
-    def generate_speech_to_file(
-        self,
-        text: str,
-        output_file: Union[str, Path],
-        voice: Optional[str] = "BV421_vivn_streaming",
-        resource_id: Optional[str] = None,
-        rate: str = "1.0",
-    ) -> str:
-        """Generate audio and save directly to file path."""
-        out_path = Path(output_file)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        audio_bytes = self.generate_speech(text, voice=voice, resource_id=resource_id, rate=rate)
-        with open(out_path, "wb") as f:
-            f.write(audio_bytes)
-        return str(out_path.resolve())

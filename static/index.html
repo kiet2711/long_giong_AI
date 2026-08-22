@@ -17,14 +17,21 @@
           <span>AI Dubbing Pipeline</span>
           <span class="badge">FFmpeg 7.1 Native</span>
           <span class="badge" style="background: rgba(16, 185, 129, 0.15); color: var(--teal); border: 1px solid rgba(16, 185, 129, 0.3);">GPU NVENC & Stream Copy</span>
+          <span class="badge" id="cacheStatsBadge" style="background: rgba(59, 130, 246, 0.15); color: #60A5FA; border: 1px solid rgba(59, 130, 246, 0.3);">⚡ Bộ nhớ đệm AI</span>
         </div>
         <h1>Công cụ Lồng tiếng AI & Đồng bộ Video tự động</h1>
         <div class="sub">Tạo giọng đọc AI từ SRT → Cắt & Khớp tốc độ video/audio → Ghép nối siêu tốc không cần CapCut PC</div>
       </div>
-      <button class="btn" id="btnCleanup" style="background: var(--surface); border: 1px solid var(--border); font-size: 12px; padding: 6px 12px; gap: 6px; margin-top: 4px;" title="Dọn dẹp các thư mục file âm thanh/video tạm cũ để giải phóng ổ cứng">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
-        Dọn dẹp rác bộ nhớ
-      </button>
+      <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+        <button class="btn btn-teal" id="btnOpenProjects" style="font-size: 12px; padding: 6px 14px; gap: 6px; margin-top: 4px;" title="Xem danh sách các dự án trước đây để mở lại hoặc tiếp tục">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+          📂 Quản Lý / Mở Dự Án Cũ
+        </button>
+        <button class="btn" id="btnCleanup" style="background: var(--surface); border: 1px solid var(--border); font-size: 12px; padding: 6px 12px; gap: 6px; margin-top: 4px;" title="Dọn dẹp các thư mục file âm thanh/video tạm cũ để giải phóng ổ cứng">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+          Dọn dẹp rác bộ nhớ
+        </button>
+      </div>
     </div>
   </header>
 
@@ -211,6 +218,16 @@
   <!-- MOCKUP / LIVE PREVIEW APP -->
   <section>
     <h2>Giao diện Xem trước & Khớp dòng phụ đề</h2>
+
+    <!-- CACHE ALERT BANNER -->
+    <div class="cache-alert-banner" id="cacheAlertBanner" style="display: none;">
+      <div class="cache-alert-icon">⚡</div>
+      <div class="cache-alert-content">
+        <div class="cache-alert-title" id="cacheAlertTitle">Đã tìm thấy âm thanh có sẵn trong Bộ nhớ đệm!</div>
+        <div class="cache-alert-desc" id="cacheAlertDesc">Đã có 0 / 0 câu có sẵn âm thanh. Quá trình tạo giọng sẽ tự động tái sử dụng trong 0s.</div>
+      </div>
+    </div>
+
     <div class="app">
       <div class="app-bar">
         <div class="app-bar-left">
@@ -273,6 +290,26 @@
       </div>
     </div>
   </section>
+
+  <!-- PROJECTS MANAGEMENT MODAL -->
+  <div class="modal-backdrop" id="projectsModalBackdrop">
+    <div class="modal-box projects-modal">
+      <div class="modal-header">
+        <div class="modal-title">📂 Quản Lý & Mở Lại Dự Án Cũ</div>
+        <div class="modal-sub" style="color: var(--muted); font-size: 13px; margin-top: 4px;">
+          Chọn dự án đã từng tải lên để mở lại video, phụ đề và tận dụng các câu âm thanh đã tạo sẵn trong Cache
+        </div>
+      </div>
+
+      <div class="projects-list" id="projectsList">
+        <div style="text-align: center; color: var(--muted); padding: 30px;">Đang tải danh sách dự án...</div>
+      </div>
+
+      <div class="modal-actions" style="margin-top: 10px;">
+        <button class="btn" id="btnCloseProjectsModal">Đóng Cửa Sổ</button>
+      </div>
+    </div>
+  </div>
 
   <!-- MODAL PROGRESS OVERLAY -->
   <div class="modal-backdrop" id="modalBackdrop">
