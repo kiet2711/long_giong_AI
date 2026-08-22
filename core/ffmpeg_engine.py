@@ -127,8 +127,10 @@ class FFmpegDubbingEngine:
     def __init__(
         self,
         tts_client: Optional[CapCutTTSClient] = None,
-        max_audio_speed: float = 1.15,
+        min_audio_speed: float = 0.80,
+        max_audio_speed: float = 1.20,
         min_video_speed: float = 0.50,
+        max_video_speed: float = 1.50,
         min_ratio: Optional[float] = None,
         max_ratio: Optional[float] = None,
         orig_volume: float = 0.15,
@@ -136,14 +138,10 @@ class FFmpegDubbingEngine:
         num_workers: int = 4,
     ):
         self.tts_client = tts_client or CapCutTTSClient()
-        # Support both max_audio_speed and legacy min_ratio
-        if min_ratio is not None and max_audio_speed == 1.15:
-            self.max_audio_speed = round(1.0 / max(0.1, min_ratio), 2)
-        else:
-            self.max_audio_speed = max_audio_speed
+        self.min_audio_speed = min_audio_speed
+        self.max_audio_speed = max_audio_speed
         self.min_video_speed = min_video_speed
-        self.min_ratio = round(1.0 / max(0.1, self.max_audio_speed), 3)
-        self.max_ratio = 1.0
+        self.max_video_speed = max_video_speed
         self.orig_volume = orig_volume
         self.dub_volume = dub_volume
         self.num_workers = num_workers
@@ -221,34 +219,65 @@ class FFmpegDubbingEngine:
             aud_dur = get_audio_duration(audio_file)
             seg.audio_path = str(audio_file)
             seg.audio_duration_sec = round(aud_dur, 3)
+            seg.ratio = round(seg.duration_sec / max(0.01, aud_dur), 2)
 
             # Assign Sync Mode based on Audio & Video Speed limits:
-            if aud_dur <= seg.duration_sec:
-                # 1. AI voice finishes within video segment duration -> 100% natural 1.0x voice & video
-                seg.ratio = round(seg.duration_sec / max(0.01, aud_dur), 2)
+            if abs(aud_dur - seg.duration_sec) < 0.05:
+                # Perfectly matched
                 seg.sync_mode = "passthrough"
                 seg.speed_applied = 1.0
                 seg.video_speed_applied = 1.0
                 seg.sync_desc = "Chuẩn 1.0x (Khớp)"
-            else:
-                # 2. AI voice is longer than video segment duration
-                needed_speed = round(aud_dur / max(0.01, seg.duration_sec), 2)
-                seg.ratio = round(seg.duration_sec / max(0.01, aud_dur), 2)
 
-                if needed_speed <= self.max_audio_speed:
-                    # Fits within allowed audio speedup limit (e.g. <= 1.15x)
+            elif aud_dur < seg.duration_sec:
+                # 1. AI Voice is SHORTER than video segment (can slow down voice or speed up video)
+                req_audio_speed = round(aud_dur / max(0.01, seg.duration_sec), 2)
+
+                if req_audio_speed >= self.min_audio_speed and self.min_audio_speed < 0.999:
+                    # Slow down AI voice to fill video segment duration
                     seg.sync_mode = "rubberband"
-                    seg.speed_applied = needed_speed
+                    seg.speed_applied = req_audio_speed
                     seg.video_speed_applied = 1.0
-                    seg.sync_desc = f"Tăng giọng {needed_speed:.2f}x (Video 1.0x)"
+                    seg.sync_desc = f"Giảm giọng {req_audio_speed:.2f}x (Video 1.0x)"
                 else:
-                    # Exceeds max audio speed -> Slow down video
-                    needed_v_speed = round(seg.duration_sec / max(0.01, aud_dur), 2)
-                    v_speed = max(self.min_video_speed, needed_v_speed)
-                    seg.sync_mode = "setpts"
-                    seg.speed_applied = 1.0
-                    seg.video_speed_applied = v_speed
-                    seg.sync_desc = f"Chậm video {v_speed:.2f}x (Giọng 1.0x)"
+                    # Exceeds allowed voice slowdown -> Speed up video
+                    req_v_speed = round(seg.duration_sec / max(0.01, aud_dur), 2)
+                    v_speed = min(self.max_video_speed, req_v_speed)
+                    if v_speed > 1.01:
+                        seg.sync_mode = "setpts"
+                        seg.speed_applied = 1.0
+                        seg.video_speed_applied = v_speed
+                        seg.sync_desc = f"Tăng video {v_speed:.2f}x (Giọng 1.0x)"
+                    else:
+                        seg.sync_mode = "passthrough"
+                        seg.speed_applied = 1.0
+                        seg.video_speed_applied = 1.0
+                        seg.sync_desc = "Chuẩn 1.0x (Khớp)"
+
+            else:
+                # 2. AI Voice is LONGER than video segment (can speed up voice or slow down video)
+                req_audio_speed = round(aud_dur / max(0.01, seg.duration_sec), 2)
+
+                if req_audio_speed <= self.max_audio_speed and self.max_audio_speed > 1.001:
+                    # Speed up AI voice
+                    seg.sync_mode = "rubberband"
+                    seg.speed_applied = req_audio_speed
+                    seg.video_speed_applied = 1.0
+                    seg.sync_desc = f"Tăng giọng {req_audio_speed:.2f}x (Video 1.0x)"
+                else:
+                    # Slow down video
+                    req_v_speed = round(seg.duration_sec / max(0.01, aud_dur), 2)
+                    v_speed = max(self.min_video_speed, req_v_speed)
+                    if v_speed < 0.99:
+                        seg.sync_mode = "setpts"
+                        seg.speed_applied = 1.0
+                        seg.video_speed_applied = v_speed
+                        seg.sync_desc = f"Chậm video {v_speed:.2f}x (Giọng 1.0x)"
+                    else:
+                        seg.sync_mode = "passthrough"
+                        seg.speed_applied = 1.0
+                        seg.video_speed_applied = 1.0
+                        seg.sync_desc = "Chuẩn 1.0x (Khớp)"
 
             completed_tts += 1
             pct = 10.0 + (completed_tts / max(1, total_dubs)) * 35.0
@@ -276,7 +305,7 @@ class FFmpegDubbingEngine:
         timeline_segs.sort(key=lambda s: s.seg_id)
 
         # Check if video speed modification is needed
-        has_video_speed_change = any(s.sync_mode == "setpts" for s in timeline_segs)
+        has_video_speed_change = any(abs((s.video_speed_applied or 1.0) - 1.0) > 0.01 for s in timeline_segs)
 
         # ---------------------------------------------------------------------
         # Step 3: Render audio track in parallel across all threads

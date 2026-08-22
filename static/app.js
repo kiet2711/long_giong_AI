@@ -33,10 +33,14 @@ const el = {
   voiceSelect: document.getElementById('voiceSelect'),
   voiceRateSelect: document.getElementById('voiceRateSelect'),
   btnPreviewVoice: document.getElementById('btnPreviewVoice'),
+  minAudioSpeedSlider: document.getElementById('minAudioSpeedSlider'),
+  minAudioSpeedBadge: document.getElementById('minAudioSpeedBadge'),
   maxAudioSpeedSlider: document.getElementById('maxAudioSpeedSlider'),
   maxAudioSpeedBadge: document.getElementById('maxAudioSpeedBadge'),
   minVideoSpeedSlider: document.getElementById('minVideoSpeedSlider'),
   minVideoSpeedBadge: document.getElementById('minVideoSpeedBadge'),
+  maxVideoSpeedSlider: document.getElementById('maxVideoSpeedSlider'),
+  maxVideoSpeedBadge: document.getElementById('maxVideoSpeedBadge'),
   origVolSlider: document.getElementById('origVolSlider'),
   origVolBadge: document.getElementById('origVolBadge'),
   dubVolSlider: document.getElementById('dubVolSlider'),
@@ -87,15 +91,25 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function updateSpeedLimitsUI() {
+  if (el.minAudioSpeedSlider && el.minAudioSpeedBadge) {
+    const minASpeed = parseFloat(el.minAudioSpeedSlider.value) || 0.80;
+    const pct = Math.round((1.0 - minASpeed) * 100);
+    el.minAudioSpeedBadge.textContent = `${minASpeed.toFixed(2)}x (${pct === 0 ? 'Không giảm' : `-${pct}%`})`;
+  }
   if (el.maxAudioSpeedSlider && el.maxAudioSpeedBadge) {
-    const aSpeed = parseFloat(el.maxAudioSpeedSlider.value) || 1.15;
+    const aSpeed = parseFloat(el.maxAudioSpeedSlider.value) || 1.20;
     const pct = Math.round((aSpeed - 1.0) * 100);
-    el.maxAudioSpeedBadge.textContent = `${aSpeed.toFixed(2)}x (${pct === 0 ? 'Nguyên bản' : `+${pct}%`})`;
+    el.maxAudioSpeedBadge.textContent = `${aSpeed.toFixed(2)}x (${pct === 0 ? 'Không tăng' : `+${pct}%`})`;
   }
   if (el.minVideoSpeedSlider && el.minVideoSpeedBadge) {
     const vSpeed = parseFloat(el.minVideoSpeedSlider.value) || 0.50;
     const pct = Math.round((1.0 - vSpeed) * 100);
     el.minVideoSpeedBadge.textContent = `${vSpeed.toFixed(2)}x (${pct === 0 ? 'Không chậm' : `Chậm tối đa ${pct}%`})`;
+  }
+  if (el.maxVideoSpeedSlider && el.maxVideoSpeedBadge) {
+    const maxVSpeed = parseFloat(el.maxVideoSpeedSlider.value) || 1.50;
+    const pct = Math.round((maxVSpeed - 1.0) * 100);
+    el.maxVideoSpeedBadge.textContent = `${maxVSpeed.toFixed(2)}x (${pct === 0 ? 'Không tăng' : `+${pct}%`})`;
   }
 }
 
@@ -195,6 +209,12 @@ function setupEventListeners() {
   if (el.dubVolSlider) {
     el.dubVolSlider.addEventListener('input', updateDubVolUI);
   }
+  if (el.minAudioSpeedSlider) {
+    el.minAudioSpeedSlider.addEventListener('input', () => {
+      updateSpeedLimitsUI();
+      if (state.subtitles.length > 0) renderSubtitleList(state.subtitles);
+    });
+  }
 
   if (el.maxAudioSpeedSlider) {
     el.maxAudioSpeedSlider.addEventListener('input', () => {
@@ -205,6 +225,12 @@ function setupEventListeners() {
 
   if (el.minVideoSpeedSlider) {
     el.minVideoSpeedSlider.addEventListener('input', () => {
+      updateSpeedLimitsUI();
+    });
+  }
+
+  if (el.maxVideoSpeedSlider) {
+    el.maxVideoSpeedSlider.addEventListener('input', () => {
       updateSpeedLimitsUI();
     });
   }
@@ -220,12 +246,19 @@ function setupEventListeners() {
       } else if (target === 'dub' && el.dubVolSlider) {
         el.dubVolSlider.value = val;
         updateDubVolUI();
-      } else if (target === 'audiospeed' && el.maxAudioSpeedSlider) {
+      } else if (target === 'min_audiospeed' && el.minAudioSpeedSlider) {
+        el.minAudioSpeedSlider.value = val;
+        updateSpeedLimitsUI();
+        if (state.subtitles.length > 0) renderSubtitleList(state.subtitles);
+      } else if (target === 'max_audiospeed' && el.maxAudioSpeedSlider) {
         el.maxAudioSpeedSlider.value = val;
         updateSpeedLimitsUI();
         if (state.subtitles.length > 0) renderSubtitleList(state.subtitles);
-      } else if (target === 'videospeed' && el.minVideoSpeedSlider) {
+      } else if (target === 'min_videospeed' && el.minVideoSpeedSlider) {
         el.minVideoSpeedSlider.value = val;
+        updateSpeedLimitsUI();
+      } else if (target === 'max_videospeed' && el.maxVideoSpeedSlider) {
+        el.maxVideoSpeedSlider.value = val;
         updateSpeedLimitsUI();
       }
     });
@@ -311,7 +344,9 @@ async function handleFileSelection() {
 
 function getSpeedBadgeInfo(item) {
   const ratio = item.ratio || 1.0;
-  const maxAudioSpeed = el.maxAudioSpeedSlider ? parseFloat(el.maxAudioSpeedSlider.value) || 1.15 : 1.15;
+  const minAudioSpeed = el.minAudioSpeedSlider ? parseFloat(el.minAudioSpeedSlider.value) || 0.80 : 0.80;
+  const maxAudioSpeed = el.maxAudioSpeedSlider ? parseFloat(el.maxAudioSpeedSlider.value) || 1.20 : 1.20;
+  const maxVideoSpeed = el.maxVideoSpeedSlider ? parseFloat(el.maxVideoSpeedSlider.value) || 1.50 : 1.50;
 
   if (item.sync_desc) {
     let cls = 'ok';
@@ -320,14 +355,27 @@ function getSpeedBadgeInfo(item) {
     return { text: item.sync_desc, cls };
   }
 
-  if (ratio >= 1.0) {
+  if (Math.abs(ratio - 1.0) < 0.05) {
     return { text: 'Chuẩn 1.0x (Khớp)', cls: 'ok' };
   }
-  const neededAudioSpeed = 1.0 / Math.max(0.1, ratio);
-  if (neededAudioSpeed <= maxAudioSpeed) {
-    return { text: `Tăng giọng ${neededAudioSpeed.toFixed(2)}x`, cls: 'ok' };
+
+  if (ratio > 1.0) {
+    // Audio is shorter than video duration -> ratio = Dv / Da > 1.0
+    const reqAudioSpeed = 1.0 / ratio;
+    if (reqAudioSpeed >= minAudioSpeed && minAudioSpeed < 0.99) {
+      return { text: `Giảm giọng ${reqAudioSpeed.toFixed(2)}x`, cls: 'ok' };
+    } else {
+      const vSpeed = Math.min(maxVideoSpeed, ratio);
+      return { text: `Tăng video ${vSpeed.toFixed(2)}x`, cls: 'warn' };
+    }
   } else {
-    return { text: `Chậm video ${ratio.toFixed(2)}x`, cls: 'warn' };
+    // Audio is longer than video duration -> ratio = Dv / Da < 1.0
+    const reqAudioSpeed = 1.0 / Math.max(0.1, ratio);
+    if (reqAudioSpeed <= maxAudioSpeed) {
+      return { text: `Tăng giọng ${reqAudioSpeed.toFixed(2)}x`, cls: 'ok' };
+    } else {
+      return { text: `Chậm video ${ratio.toFixed(2)}x`, cls: 'warn' };
+    }
   }
 }
 
@@ -477,8 +525,10 @@ async function startDubbingProcess() {
     srt_orig_path: state.srtOrigPath,
     voice: el.voiceSelect.value,
     voice_rate: el.voiceRateSelect.value,
-    max_audio_speed: el.maxAudioSpeedSlider ? parseFloat(el.maxAudioSpeedSlider.value) : 1.15,
+    min_audio_speed: el.minAudioSpeedSlider ? parseFloat(el.minAudioSpeedSlider.value) : 0.80,
+    max_audio_speed: el.maxAudioSpeedSlider ? parseFloat(el.maxAudioSpeedSlider.value) : 1.20,
     min_video_speed: el.minVideoSpeedSlider ? parseFloat(el.minVideoSpeedSlider.value) : 0.50,
+    max_video_speed: el.maxVideoSpeedSlider ? parseFloat(el.maxVideoSpeedSlider.value) : 1.50,
     orig_volume: origVolVal,
     dub_volume: dubVolVal,
     num_workers: parseInt(el.threadsSlider.value, 10) || 50,
