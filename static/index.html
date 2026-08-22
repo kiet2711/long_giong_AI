@@ -195,75 +195,49 @@
           </div>
         </div>
 
-        <!-- Slider 3: Min Audio Speed (Slowdown) -->
+        <!-- Dual Slider 1: AI Audio Speed Range -->
         <div class="slider-group" style="margin-top: 8px;">
           <div class="slider-header">
-            <label>Giảm tốc giọng AI tối thiểu (Min Audio Speed)</label>
-            <span id="minAudioSpeedBadge" class="slider-badge badge-amber">0.80x (-20%)</span>
+            <label>Dải Tốc độ Giọng đọc AI (Tối thiểu ⟷ Tối đa)</label>
+            <span id="audioSpeedRangeBadge" class="slider-badge badge-amber">0.80x ⟷ 1.20x</span>
           </div>
-          <input type="range" id="minAudioSpeedSlider" class="slider-input" min="0.50" max="1.00" value="0.80" step="0.05">
+          <div class="dual-range-wrapper">
+            <div class="dual-range-track"></div>
+            <div class="dual-range-highlight" id="audioRangeHighlight"></div>
+            <input type="range" id="minAudioSpeedSlider" class="dual-range-thumb" min="0.50" max="2.00" value="0.80" step="0.05">
+            <input type="range" id="maxAudioSpeedSlider" class="dual-range-thumb" min="0.50" max="2.00" value="1.20" step="0.05">
+          </div>
           <div class="quick-presets">
-            <button type="button" class="preset-btn" data-target="min_audiospeed" data-val="0.70">0.70x (-30%)</button>
-            <button type="button" class="preset-btn" data-target="min_audiospeed" data-val="0.80">0.80x (-20%)</button>
-            <button type="button" class="preset-btn" data-target="min_audiospeed" data-val="0.90">0.90x (-10%)</button>
-            <button type="button" class="preset-btn" data-target="min_audiospeed" data-val="1.00">1.00x (Không giảm)</button>
+            <button type="button" class="preset-btn" data-target="audiorange" data-min="0.80" data-max="1.20">0.80x – 1.20x (Chuẩn)</button>
+            <button type="button" class="preset-btn" data-target="audiorange" data-min="1.00" data-max="1.00">1.00x (Khóa cố định)</button>
+            <button type="button" class="preset-btn" data-target="audiorange" data-min="0.75" data-max="1.25">0.75x – 1.25x (Linh hoạt)</button>
+            <button type="button" class="preset-btn" data-target="audiorange" data-min="1.00" data-max="1.30">1.00x – 1.30x (Chỉ tăng)</button>
           </div>
           <div style="font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.35;">
-            * Khi giọng đọc ngắn hơn video, cho phép đọc chậm lại để kéo dài khớp cảnh.
+            * Cho phép giọng AI tự điều chỉnh chậm lại (tối thiểu) hoặc tăng nhanh lên (tối đa) để vừa khít câu thoại.
           </div>
         </div>
 
-        <!-- Slider 4: Max Audio Speed (Speedup) -->
+        <!-- Dual Slider 2: Video Speed Range -->
         <div class="slider-group" style="margin-top: 8px;">
           <div class="slider-header">
-            <label>Tăng tốc giọng AI tối đa (Max Audio Speed)</label>
-            <span id="maxAudioSpeedBadge" class="slider-badge badge-amber">1.20x (+20%)</span>
+            <label>Dải Tốc độ Video (Làm chậm ⟷ Tăng tốc)</label>
+            <span id="videoSpeedRangeBadge" class="slider-badge badge-teal">0.50x ⟷ 1.50x</span>
           </div>
-          <input type="range" id="maxAudioSpeedSlider" class="slider-input" min="1.00" max="2.00" value="1.20" step="0.05">
+          <div class="dual-range-wrapper">
+            <div class="dual-range-track"></div>
+            <div class="dual-range-highlight teal" id="videoRangeHighlight"></div>
+            <input type="range" id="minVideoSpeedSlider" class="dual-range-thumb slider-teal" min="0.30" max="2.00" value="0.50" step="0.05">
+            <input type="range" id="maxVideoSpeedSlider" class="dual-range-thumb slider-teal" min="0.30" max="2.00" value="1.50" step="0.05">
+          </div>
           <div class="quick-presets">
-            <button type="button" class="preset-btn" data-target="max_audiospeed" data-val="1.00">1.00x (Không tăng)</button>
-            <button type="button" class="preset-btn" data-target="max_audiospeed" data-val="1.15">1.15x (+15%)</button>
-            <button type="button" class="preset-btn" data-target="max_audiospeed" data-val="1.20">1.20x (+20%)</button>
-            <button type="button" class="preset-btn" data-target="max_audiospeed" data-val="1.30">1.30x (+30%)</button>
+            <button type="button" class="preset-btn" data-target="videorange" data-min="0.50" data-max="1.50">0.50x – 1.50x (Chuẩn)</button>
+            <button type="button" class="preset-btn" data-target="videorange" data-min="1.00" data-max="1.00">1.00x (Khóa cố định)</button>
+            <button type="button" class="preset-btn" data-target="videorange" data-min="0.70" data-max="1.30">0.70x – 1.30x (Vừa phải)</button>
+            <button type="button" class="preset-btn" data-target="videorange" data-min="0.50" data-max="1.00">0.50x – 1.00x (Chỉ chậm)</button>
           </div>
           <div style="font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.35;">
-            * Khi giọng đọc dài hơn video, cho phép đọc nhanh lên để nói kịp cảnh.
-          </div>
-        </div>
-
-        <!-- Slider 5: Min Video Speed (Slowdown) -->
-        <div class="slider-group" style="margin-top: 8px;">
-          <div class="slider-header">
-            <label>Làm chậm Video tối đa (Min Video Speed)</label>
-            <span id="minVideoSpeedBadge" class="slider-badge badge-teal">0.50x (Chậm tối đa 50%)</span>
-          </div>
-          <input type="range" id="minVideoSpeedSlider" class="slider-input slider-teal" min="0.30" max="1.00" value="0.50" step="0.05">
-          <div class="quick-presets">
-            <button type="button" class="preset-btn" data-target="min_videospeed" data-val="0.50">0.50x (-50%)</button>
-            <button type="button" class="preset-btn" data-target="min_videospeed" data-val="0.70">0.70x (-30%)</button>
-            <button type="button" class="preset-btn" data-target="min_videospeed" data-val="0.80">0.80x (-20%)</button>
-            <button type="button" class="preset-btn" data-target="min_videospeed" data-val="1.00">1.00x (Không chậm)</button>
-          </div>
-          <div style="font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.35;">
-            * Khi giọng đọc quá dài vượt giới hạn tăng tốc giọng, video sẽ làm chậm để chờ giọng đọc.
-          </div>
-        </div>
-
-        <!-- Slider 6: Max Video Speed (Speedup) -->
-        <div class="slider-group" style="margin-top: 8px;">
-          <div class="slider-header">
-            <label>Tăng tốc Video tối đa (Max Video Speed)</label>
-            <span id="maxVideoSpeedBadge" class="slider-badge badge-teal">1.50x (+50%)</span>
-          </div>
-          <input type="range" id="maxVideoSpeedSlider" class="slider-input slider-teal" min="1.00" max="2.00" value="1.50" step="0.05">
-          <div class="quick-presets">
-            <button type="button" class="preset-btn" data-target="max_videospeed" data-val="1.00">1.00x (Không tăng)</button>
-            <button type="button" class="preset-btn" data-target="max_videospeed" data-val="1.25">1.25x (+25%)</button>
-            <button type="button" class="preset-btn" data-target="max_videospeed" data-val="1.50">1.50x (+50%)</button>
-            <button type="button" class="preset-btn" data-target="max_videospeed" data-val="2.00">2.00x (+100%)</button>
-          </div>
-          <div style="font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.35;">
-            * Khi giọng đọc ngắn hơn video và không muốn giảm giọng, video sẽ tăng tốc để kết thúc sớm khớp giọng.
+            * Mức video được phép làm chậm hoặc tăng tốc khi giọng đọc lệch quá giới hạn tốc độ giọng.
           </div>
         </div>
 

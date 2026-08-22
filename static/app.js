@@ -33,14 +33,14 @@ const el = {
   voiceSelect: document.getElementById('voiceSelect'),
   voiceRateSelect: document.getElementById('voiceRateSelect'),
   btnPreviewVoice: document.getElementById('btnPreviewVoice'),
+  audioSpeedRangeBadge: document.getElementById('audioSpeedRangeBadge'),
+  audioRangeHighlight: document.getElementById('audioRangeHighlight'),
   minAudioSpeedSlider: document.getElementById('minAudioSpeedSlider'),
-  minAudioSpeedBadge: document.getElementById('minAudioSpeedBadge'),
   maxAudioSpeedSlider: document.getElementById('maxAudioSpeedSlider'),
-  maxAudioSpeedBadge: document.getElementById('maxAudioSpeedBadge'),
+  videoSpeedRangeBadge: document.getElementById('videoSpeedRangeBadge'),
+  videoRangeHighlight: document.getElementById('videoRangeHighlight'),
   minVideoSpeedSlider: document.getElementById('minVideoSpeedSlider'),
-  minVideoSpeedBadge: document.getElementById('minVideoSpeedBadge'),
   maxVideoSpeedSlider: document.getElementById('maxVideoSpeedSlider'),
-  maxVideoSpeedBadge: document.getElementById('maxVideoSpeedBadge'),
   origVolSlider: document.getElementById('origVolSlider'),
   origVolBadge: document.getElementById('origVolBadge'),
   dubVolSlider: document.getElementById('dubVolSlider'),
@@ -91,25 +91,60 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function updateSpeedLimitsUI() {
-  if (el.minAudioSpeedSlider && el.minAudioSpeedBadge) {
-    const minASpeed = parseFloat(el.minAudioSpeedSlider.value) || 0.80;
-    const pct = Math.round((1.0 - minASpeed) * 100);
-    el.minAudioSpeedBadge.textContent = `${minASpeed.toFixed(2)}x (${pct === 0 ? 'Không giảm' : `-${pct}%`})`;
+  // 1. Audio Speed Range
+  if (el.minAudioSpeedSlider && el.maxAudioSpeedSlider) {
+    let minA = parseFloat(el.minAudioSpeedSlider.value) || 0.80;
+    let maxA = parseFloat(el.maxAudioSpeedSlider.value) || 1.20;
+    if (minA > maxA) {
+      minA = maxA;
+      el.minAudioSpeedSlider.value = minA;
+    }
+
+    // Audio range is 0.50 to 2.00 (total span = 1.50)
+    const leftPct = ((minA - 0.50) / 1.50) * 100;
+    const rightPct = ((maxA - 0.50) / 1.50) * 100;
+    if (el.audioRangeHighlight) {
+      el.audioRangeHighlight.style.left = `${leftPct}%`;
+      el.audioRangeHighlight.style.width = `${Math.max(2, rightPct - leftPct)}%`;
+    }
+
+    if (el.audioSpeedRangeBadge) {
+      if (Math.abs(minA - 1.0) < 0.01 && Math.abs(maxA - 1.0) < 0.01) {
+        el.audioSpeedRangeBadge.textContent = '1.00x (Khóa cố định)';
+      } else if (Math.abs(minA - maxA) < 0.01) {
+        el.audioSpeedRangeBadge.textContent = `${minA.toFixed(2)}x (Cố định)`;
+      } else {
+        el.audioSpeedRangeBadge.textContent = `${minA.toFixed(2)}x ⟷ ${maxA.toFixed(2)}x`;
+      }
+    }
   }
-  if (el.maxAudioSpeedSlider && el.maxAudioSpeedBadge) {
-    const aSpeed = parseFloat(el.maxAudioSpeedSlider.value) || 1.20;
-    const pct = Math.round((aSpeed - 1.0) * 100);
-    el.maxAudioSpeedBadge.textContent = `${aSpeed.toFixed(2)}x (${pct === 0 ? 'Không tăng' : `+${pct}%`})`;
-  }
-  if (el.minVideoSpeedSlider && el.minVideoSpeedBadge) {
-    const vSpeed = parseFloat(el.minVideoSpeedSlider.value) || 0.50;
-    const pct = Math.round((1.0 - vSpeed) * 100);
-    el.minVideoSpeedBadge.textContent = `${vSpeed.toFixed(2)}x (${pct === 0 ? 'Không chậm' : `Chậm tối đa ${pct}%`})`;
-  }
-  if (el.maxVideoSpeedSlider && el.maxVideoSpeedBadge) {
-    const maxVSpeed = parseFloat(el.maxVideoSpeedSlider.value) || 1.50;
-    const pct = Math.round((maxVSpeed - 1.0) * 100);
-    el.maxVideoSpeedBadge.textContent = `${maxVSpeed.toFixed(2)}x (${pct === 0 ? 'Không tăng' : `+${pct}%`})`;
+
+  // 2. Video Speed Range
+  if (el.minVideoSpeedSlider && el.maxVideoSpeedSlider) {
+    let minV = parseFloat(el.minVideoSpeedSlider.value) || 0.50;
+    let maxV = parseFloat(el.maxVideoSpeedSlider.value) || 1.50;
+    if (minV > maxV) {
+      minV = maxV;
+      el.minVideoSpeedSlider.value = minV;
+    }
+
+    // Video range is 0.30 to 2.00 (total span = 1.70)
+    const leftPct = ((minV - 0.30) / 1.70) * 100;
+    const rightPct = ((maxV - 0.30) / 1.70) * 100;
+    if (el.videoRangeHighlight) {
+      el.videoRangeHighlight.style.left = `${leftPct}%`;
+      el.videoRangeHighlight.style.width = `${Math.max(2, rightPct - leftPct)}%`;
+    }
+
+    if (el.videoSpeedRangeBadge) {
+      if (Math.abs(minV - 1.0) < 0.01 && Math.abs(maxV - 1.0) < 0.01) {
+        el.videoSpeedRangeBadge.textContent = '1.00x (Khóa 1.0x - 0s Encode)';
+      } else if (Math.abs(minV - maxV) < 0.01) {
+        el.videoSpeedRangeBadge.textContent = `${minV.toFixed(2)}x (Cố định)`;
+      } else {
+        el.videoSpeedRangeBadge.textContent = `${minV.toFixed(2)}x ⟷ ${maxV.toFixed(2)}x`;
+      }
+    }
   }
 }
 
@@ -209,28 +244,39 @@ function setupEventListeners() {
   if (el.dubVolSlider) {
     el.dubVolSlider.addEventListener('input', updateDubVolUI);
   }
-  if (el.minAudioSpeedSlider) {
+
+  // Dual Range Slider 1: Audio Speed
+  if (el.minAudioSpeedSlider && el.maxAudioSpeedSlider) {
     el.minAudioSpeedSlider.addEventListener('input', () => {
+      const minA = parseFloat(el.minAudioSpeedSlider.value);
+      const maxA = parseFloat(el.maxAudioSpeedSlider.value);
+      if (minA > maxA) el.maxAudioSpeedSlider.value = minA;
       updateSpeedLimitsUI();
       if (state.subtitles.length > 0) renderSubtitleList(state.subtitles);
     });
-  }
 
-  if (el.maxAudioSpeedSlider) {
     el.maxAudioSpeedSlider.addEventListener('input', () => {
+      const minA = parseFloat(el.minAudioSpeedSlider.value);
+      const maxA = parseFloat(el.maxAudioSpeedSlider.value);
+      if (maxA < minA) el.minAudioSpeedSlider.value = maxA;
       updateSpeedLimitsUI();
       if (state.subtitles.length > 0) renderSubtitleList(state.subtitles);
     });
   }
 
-  if (el.minVideoSpeedSlider) {
+  // Dual Range Slider 2: Video Speed
+  if (el.minVideoSpeedSlider && el.maxVideoSpeedSlider) {
     el.minVideoSpeedSlider.addEventListener('input', () => {
+      const minV = parseFloat(el.minVideoSpeedSlider.value);
+      const maxV = parseFloat(el.maxVideoSpeedSlider.value);
+      if (minV > maxV) el.maxVideoSpeedSlider.value = minV;
       updateSpeedLimitsUI();
     });
-  }
 
-  if (el.maxVideoSpeedSlider) {
     el.maxVideoSpeedSlider.addEventListener('input', () => {
+      const minV = parseFloat(el.minVideoSpeedSlider.value);
+      const maxV = parseFloat(el.maxVideoSpeedSlider.value);
+      if (maxV < minV) el.minVideoSpeedSlider.value = maxV;
       updateSpeedLimitsUI();
     });
   }
@@ -239,26 +285,20 @@ function setupEventListeners() {
   document.querySelectorAll('.preset-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
       const target = btn.dataset.target;
-      const val = btn.dataset.val;
       if (target === 'orig' && el.origVolSlider) {
-        el.origVolSlider.value = val;
+        el.origVolSlider.value = btn.dataset.val;
         updateOrigVolUI();
       } else if (target === 'dub' && el.dubVolSlider) {
-        el.dubVolSlider.value = val;
+        el.dubVolSlider.value = btn.dataset.val;
         updateDubVolUI();
-      } else if (target === 'min_audiospeed' && el.minAudioSpeedSlider) {
-        el.minAudioSpeedSlider.value = val;
+      } else if (target === 'audiorange' && el.minAudioSpeedSlider && el.maxAudioSpeedSlider) {
+        el.minAudioSpeedSlider.value = btn.dataset.min;
+        el.maxAudioSpeedSlider.value = btn.dataset.max;
         updateSpeedLimitsUI();
         if (state.subtitles.length > 0) renderSubtitleList(state.subtitles);
-      } else if (target === 'max_audiospeed' && el.maxAudioSpeedSlider) {
-        el.maxAudioSpeedSlider.value = val;
-        updateSpeedLimitsUI();
-        if (state.subtitles.length > 0) renderSubtitleList(state.subtitles);
-      } else if (target === 'min_videospeed' && el.minVideoSpeedSlider) {
-        el.minVideoSpeedSlider.value = val;
-        updateSpeedLimitsUI();
-      } else if (target === 'max_videospeed' && el.maxVideoSpeedSlider) {
-        el.maxVideoSpeedSlider.value = val;
+      } else if (target === 'videorange' && el.minVideoSpeedSlider && el.maxVideoSpeedSlider) {
+        el.minVideoSpeedSlider.value = btn.dataset.min;
+        el.maxVideoSpeedSlider.value = btn.dataset.max;
         updateSpeedLimitsUI();
       }
     });
