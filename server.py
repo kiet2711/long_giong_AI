@@ -235,7 +235,16 @@ async def start_dubbing(req: StartDubbingRequest):
     job_id = uuid.uuid4().hex[:10]
     work_dir = TEMP_DIR / f"job_{job_id}"
     work_dir.mkdir(parents=True, exist_ok=True)
-    out_video_path = OUTPUTS_DIR / f"dubbed_{job_id}.mp4"
+
+    # Group each video & SRT into its own dedicated project folder
+    video_stem = Path(req.video_path).stem
+    safe_stem = "".join(c for c in video_stem if c.isalnum() or c in ("-", "_", " ")).strip() or "video"
+    time_tag = time.strftime("%Y%m%d_%H%M%S")
+    folder_name = f"{safe_stem}_{time_tag}"
+    job_output_dir = OUTPUTS_DIR / folder_name
+    job_output_dir.mkdir(parents=True, exist_ok=True)
+
+    out_video_path = job_output_dir / f"{safe_stem}_dubbed.mp4"
 
     sub_items = SRTParser.parse_paired_srt(req.srt_dub_path, req.srt_orig_path)
 
@@ -312,15 +321,16 @@ async def start_dubbing(req: StartDubbingRequest):
                     jobs_state[job_id]["failed_segments"] = result.get("failed_segments", [])
                 return
 
-            out_srt_path = OUTPUTS_DIR / f"dubbed_{job_id}.srt"
-            srt_url = f"/temp/outputs/{out_srt_path.name}" if out_srt_path.exists() else None
+            out_srt_path = out_video_path.with_suffix(".srt")
+            srt_url = f"/temp/outputs/{folder_name}/{out_srt_path.name}" if out_srt_path.exists() else None
+            video_url = f"/temp/outputs/{folder_name}/{out_video_path.name}"
 
             with job_locks:
                 jobs_state[job_id]["status"] = "completed"
                 jobs_state[job_id]["percent"] = 100.0
                 jobs_state[job_id]["stage"] = "completed"
                 jobs_state[job_id]["output_path"] = str(out_video_path)
-                jobs_state[job_id]["output_url"] = f"/temp/outputs/{out_video_path.name}"
+                jobs_state[job_id]["output_url"] = video_url
                 jobs_state[job_id]["output_srt_url"] = srt_url
                 jobs_state[job_id]["result"] = result
 
@@ -331,7 +341,7 @@ async def start_dubbing(req: StartDubbingRequest):
                         "percent": 100.0,
                         "stage": "completed",
                         "message": "Hoàn tất! Video & Phụ đề SRT đã sẵn sàng tải về.",
-                        "output_url": f"/temp/outputs/{out_video_path.name}",
+                        "output_url": video_url,
                         "output_srt_url": srt_url,
                         "result": result,
                     },
@@ -489,15 +499,17 @@ async def resume_dubbing_render(req: ResumeRenderRequest):
                 progress_cb=on_progress,
             )
 
-            out_srt_path = OUTPUTS_DIR / f"dubbed_{req.job_id}.srt"
-            srt_url = f"/temp/outputs/{out_srt_path.name}" if out_srt_path.exists() else None
+            out_srt_path = out_video_path.with_suffix(".srt")
+            job_folder_name = out_video_path.parent.name
+            srt_url = f"/temp/outputs/{job_folder_name}/{out_srt_path.name}" if out_srt_path.exists() else None
+            video_url = f"/temp/outputs/{job_folder_name}/{out_video_path.name}"
 
             with job_locks:
                 jobs_state[req.job_id]["status"] = "completed"
                 jobs_state[req.job_id]["percent"] = 100.0
                 jobs_state[req.job_id]["stage"] = "completed"
                 jobs_state[req.job_id]["output_path"] = str(out_video_path)
-                jobs_state[req.job_id]["output_url"] = f"/temp/outputs/{out_video_path.name}"
+                jobs_state[req.job_id]["output_url"] = video_url
                 jobs_state[req.job_id]["output_srt_url"] = srt_url
                 jobs_state[req.job_id]["result"] = result
 
@@ -508,7 +520,7 @@ async def resume_dubbing_render(req: ResumeRenderRequest):
                         "percent": 100.0,
                         "stage": "completed",
                         "message": "Hoàn tất! Video & Phụ đề SRT đã sẵn sàng tải về.",
-                        "output_url": f"/temp/outputs/{out_video_path.name}",
+                        "output_url": video_url,
                         "output_srt_url": srt_url,
                         "result": result,
                     },
@@ -669,11 +681,11 @@ async def open_local_file_or_folder(req: OpenFileRequest):
             return {"status": "ok", "message": f"Đã mở file: {out_srt_path.name}"}
 
         elif req.target == "folder":
-            if out_video_path and out_video_path.exists():
-                subprocess.Popen(f'explorer /select,"{str(out_video_path.resolve())}"')
+            if out_video_path and out_video_path.parent.exists():
+                subprocess.Popen(f'explorer "{str(out_video_path.parent.resolve())}"')
             else:
                 subprocess.Popen(f'explorer "{str(OUTPUTS_DIR.resolve())}"')
-            return {"status": "ok", "message": "Đã mở thư mục outputs"}
+            return {"status": "ok", "message": "Đã mở thư mục chứa video và phụ đề"}
 
         else:
             subprocess.Popen(f'explorer "{str(OUTPUTS_DIR.resolve())}"')
