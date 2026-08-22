@@ -151,7 +151,38 @@
           3. Tinh chỉnh Đồng bộ & Âm lượng
         </div>
 
-        <div class="row-inputs form-group">
+        <!-- Slider 1: Global Original Video Volume -->
+        <div class="slider-group">
+          <div class="slider-header">
+            <label>Âm lượng Video Gốc (Toàn bộ track)</label>
+            <span id="origVolBadge" class="slider-badge badge-amber">15% (Nhạc nền)</span>
+          </div>
+          <input type="range" id="origVolSlider" class="slider-input" min="0" max="200" value="15" step="1">
+          <div class="quick-presets">
+            <button type="button" class="preset-btn" data-target="orig" data-val="0">0% Tắt tiếng</button>
+            <button type="button" class="preset-btn" data-target="orig" data-val="15">15% Nền nhỏ</button>
+            <button type="button" class="preset-btn" data-target="orig" data-val="50">50% Vừa</button>
+            <button type="button" class="preset-btn" data-target="orig" data-val="100">100% Gốc</button>
+          </div>
+        </div>
+
+        <!-- Slider 2: AI Dubbing Volume -->
+        <div class="slider-group">
+          <div class="slider-header">
+            <label>Âm lượng Giọng đọc AI</label>
+            <span id="dubVolBadge" class="slider-badge badge-teal">120% (Rõ nét)</span>
+          </div>
+          <input type="range" id="dubVolSlider" class="slider-input slider-teal" min="20" max="300" value="120" step="5">
+          <div class="quick-presets">
+            <button type="button" class="preset-btn" data-target="dub" data-val="80">80%</button>
+            <button type="button" class="preset-btn" data-target="dub" data-val="100">100%</button>
+            <button type="button" class="preset-btn" data-target="dub" data-val="120">120%</button>
+            <button type="button" class="preset-btn" data-target="dub" data-val="150">150%</button>
+          </div>
+        </div>
+
+        <!-- Row: Min / Max Ratio -->
+        <div class="row-inputs form-group" style="margin-top: 8px;">
           <div>
             <label>Min Ratio (Stretch)</label>
             <input type="number" id="minRatioInput" step="0.05" value="0.90" min="0.5" max="1.0">
@@ -162,23 +193,13 @@
           </div>
         </div>
 
-        <div class="row-inputs form-group">
-          <div>
-            <label>Vol Video Gốc</label>
-            <input type="number" id="origVolInput" step="0.05" value="0.15" min="0.0" max="1.0">
+        <!-- Threads Slider -->
+        <div class="slider-group" style="margin-top: 8px;">
+          <div class="slider-header">
+            <label>Đa luồng xử lý (Threads)</label>
+            <span id="threadsValue" class="slider-badge badge-teal">50 luồng</span>
           </div>
-          <div>
-            <label>Vol Giọng AI</label>
-            <input type="number" id="dubVolInput" step="0.1" value="1.20" min="0.5" max="3.0">
-          </div>
-        </div>
-
-        <div class="form-group" style="margin-top: 10px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-            <label style="margin-bottom: 0;">Đa luồng xử lý (Threads)</label>
-            <span id="threadsValue" class="badge" style="background: rgba(61, 217, 197, 0.15); color: var(--teal); border: 1px solid rgba(61, 217, 197, 0.3); padding: 1px 8px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 11px;">50 luồng</span>
-          </div>
-          <input type="range" id="threadsSlider" min="1" max="200" value="50" step="1" style="width: 100%; accent-color: var(--teal); cursor: pointer;">
+          <input type="range" id="threadsSlider" class="slider-input slider-teal" min="1" max="200" value="50" step="1">
         </div>
 
         <div class="form-group" style="margin-top: 14px;">

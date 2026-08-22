@@ -252,11 +252,11 @@ async def start_dubbing(req: StartDubbingRequest):
         try:
             engine = FFmpegDubbingEngine(
                 tts_client=tts_client,
-                min_ratio=req.min_ratio or 0.90,
-                max_ratio=req.max_ratio or 1.15,
-                orig_volume=req.orig_volume or 0.15,
-                dub_volume=req.dub_volume or 1.20,
-                num_workers=req.num_workers or 50,
+                min_ratio=req.min_ratio if req.min_ratio is not None else 0.90,
+                max_ratio=req.max_ratio if req.max_ratio is not None else 1.15,
+                orig_volume=req.orig_volume if req.orig_volume is not None else 0.15,
+                dub_volume=req.dub_volume if req.dub_volume is not None else 1.20,
+                num_workers=req.num_workers if req.num_workers is not None else 50,
             )
 
             # Thread-safe async broadcaster loop

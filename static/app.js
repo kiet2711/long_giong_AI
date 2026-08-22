@@ -35,8 +35,10 @@ const el = {
   btnPreviewVoice: document.getElementById('btnPreviewVoice'),
   minRatioInput: document.getElementById('minRatioInput'),
   maxRatioInput: document.getElementById('maxRatioInput'),
-  origVolInput: document.getElementById('origVolInput'),
-  dubVolInput: document.getElementById('dubVolInput'),
+  origVolSlider: document.getElementById('origVolSlider'),
+  origVolBadge: document.getElementById('origVolBadge'),
+  dubVolSlider: document.getElementById('dubVolSlider'),
+  dubVolBadge: document.getElementById('dubVolBadge'),
   threadsSlider: document.getElementById('threadsSlider'),
   threadsValue: document.getElementById('threadsValue'),
   btnStartDubbing: document.getElementById('btnStartDubbing'),
@@ -77,7 +79,31 @@ document.addEventListener('DOMContentLoaded', () => {
   buildFakeWaveforms();
   setupEventListeners();
   loadSampleMockData();
+  updateOrigVolUI();
+  updateDubVolUI();
 });
+
+function updateOrigVolUI() {
+  if (!el.origVolSlider || !el.origVolBadge) return;
+  const val = parseInt(el.origVolSlider.value, 10);
+  let desc = `${val}%`;
+  if (val === 0) desc = '0% (Tắt tiếng gốc)';
+  else if (val <= 20) desc = `${val}% (Nền nhỏ)`;
+  else if (val <= 60) desc = `${val}% (Nền vừa)`;
+  else if (val === 100) desc = '100% (Gốc 100%)';
+  else desc = `${val}% (Khuếch đại)`;
+  el.origVolBadge.textContent = desc;
+}
+
+function updateDubVolUI() {
+  if (!el.dubVolSlider || !el.dubVolBadge) return;
+  const val = parseInt(el.dubVolSlider.value, 10);
+  let desc = `${val}%`;
+  if (val === 100) desc = '100% (Chuẩn)';
+  else if (val === 120) desc = '120% (Rõ nét)';
+  else if (val > 150) desc = `${val}% (Khuếch đại lớn)`;
+  el.dubVolBadge.textContent = desc;
+}
 
 // --- API: Load Voices ---
 async function loadVoices() {
@@ -144,6 +170,29 @@ function setupEventListeners() {
   el.mainVideo.addEventListener('ended', () => {
     state.isPlaying = false;
     updatePlayButton();
+  });
+
+  // Range sliders
+  if (el.origVolSlider) {
+    el.origVolSlider.addEventListener('input', updateOrigVolUI);
+  }
+  if (el.dubVolSlider) {
+    el.dubVolSlider.addEventListener('input', updateDubVolUI);
+  }
+
+  // Quick preset buttons
+  document.querySelectorAll('.preset-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const target = btn.dataset.target;
+      const val = btn.dataset.val;
+      if (target === 'orig' && el.origVolSlider) {
+        el.origVolSlider.value = val;
+        updateOrigVolUI();
+      } else if (target === 'dub' && el.dubVolSlider) {
+        el.dubVolSlider.value = val;
+        updateDubVolUI();
+      }
+    });
   });
 
   el.threadsSlider.addEventListener('input', () => {
@@ -347,6 +396,9 @@ async function startDubbingProcess() {
     return;
   }
 
+  const origVolVal = el.origVolSlider ? (parseFloat(el.origVolSlider.value) / 100.0) : 0.15;
+  const dubVolVal = el.dubVolSlider ? (parseFloat(el.dubVolSlider.value) / 100.0) : 1.20;
+
   const payload = {
     video_path: state.videoPath,
     srt_dub_path: state.srtDubPath,
@@ -355,8 +407,8 @@ async function startDubbingProcess() {
     voice_rate: el.voiceRateSelect.value,
     min_ratio: parseFloat(el.minRatioInput.value) || 0.90,
     max_ratio: parseFloat(el.maxRatioInput.value) || 1.15,
-    orig_volume: parseFloat(el.origVolInput.value) || 0.15,
-    dub_volume: parseFloat(el.dubVolInput.value) || 1.20,
+    orig_volume: origVolVal,
+    dub_volume: dubVolVal,
     num_workers: parseInt(el.threadsSlider.value, 10) || 50,
   };
 

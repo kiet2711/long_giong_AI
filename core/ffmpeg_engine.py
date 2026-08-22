@@ -313,17 +313,23 @@ class FFmpegDubbingEngine:
             "-ac", "2",
         ]
 
+        has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
+
         if seg.seg_type == "gap":
-            # Gap Segment: Cut original video and audio with 1.0x speed
-            if video_meta.has_audio:
+            # Gap Segment: Cut original video and audio with 1.0x speed, applying global orig_volume
+            if has_orig_audio:
+                filter_complex = f"[0:a]volume={self.orig_volume:.4f}[aout]"
                 cmd = [
                     "ffmpeg", "-y",
                     "-ss", str(seg.start_sec),
                     "-t", str(seg.duration_sec),
                     "-i", str(video_path),
+                    "-filter_complex", filter_complex,
+                    "-map", "0:v:0",
+                    "-map", "[aout]",
                 ] + v_common + a_common + [str(output_path)]
             else:
-                # Add silent audio track if original video has no audio
+                # Add silent audio track if original video has no audio or orig_volume is 0 (muted)
                 cmd = [
                     "ffmpeg", "-y",
                     "-ss", str(seg.start_sec),
@@ -348,10 +354,10 @@ class FFmpegDubbingEngine:
                 # audio stretch tempo = 1 / ratio
                 tempo = max(0.5, min(2.0, 1.0 / ratio))
 
-                if video_meta.has_audio:
+                if has_orig_audio:
                     filter_complex = (
-                        f"[0:a]volume={self.orig_volume}[bga]; "
-                        f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume}[duba]; "
+                        f"[0:a]volume={self.orig_volume:.4f}[bga]; "
+                        f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f}[duba]; "
                         f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
                     )
                     cmd = [
@@ -365,7 +371,7 @@ class FFmpegDubbingEngine:
                         "-map", "[aout]",
                     ] + v_common + a_common + [str(output_path)]
                 else:
-                    filter_complex = f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume}[aout]"
+                    filter_complex = f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f}[aout]"
                     cmd = [
                         "ffmpeg", "-y",
                         "-ss", str(seg.start_sec),
@@ -382,13 +388,13 @@ class FFmpegDubbingEngine:
                 # setpts factor = 1 / ratio (makes video longer or shorter to match audio)
                 setpts_factor = 1.0 / ratio
 
-                if video_meta.has_audio:
+                if has_orig_audio:
                     # stretch background audio to match video duration
                     bg_tempo = max(0.5, min(2.0, ratio))
                     filter_complex = (
                         f"[0:v]setpts={setpts_factor:.4f}*PTS[vout]; "
-                        f"[0:a]volume={self.orig_volume},rubberband=tempo={bg_tempo:.4f}[bga]; "
-                        f"[1:a]volume={self.dub_volume}[duba]; "
+                        f"[0:a]volume={self.orig_volume:.4f},rubberband=tempo={bg_tempo:.4f}[bga]; "
+                        f"[1:a]volume={self.dub_volume:.4f}[duba]; "
                         f"[bga][duba]amix=inputs=2:duration=second:dropout_transition=0[aout]"
                     )
                     cmd = [
@@ -404,7 +410,7 @@ class FFmpegDubbingEngine:
                 else:
                     filter_complex = (
                         f"[0:v]setpts={setpts_factor:.4f}*PTS[vout]; "
-                        f"[1:a]volume={self.dub_volume}[aout]"
+                        f"[1:a]volume={self.dub_volume:.4f}[aout]"
                     )
                     cmd = [
                         "ffmpeg", "-y",
@@ -434,6 +440,7 @@ class FFmpegDubbingEngine:
         target_fps: float,
     ):
         """Fallback filter using built-in atempo if rubberband has library issues."""
+        has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
         ratio = seg.ratio or 1.0
         tempo = max(0.5, min(2.0, 1.0 / ratio))
         audio_p = Path(seg.audio_path)
@@ -446,11 +453,15 @@ class FFmpegDubbingEngine:
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
         ]
 
-        filter_complex = (
-            f"[0:a]volume={self.orig_volume}[bga]; "
-            f"[1:a]atempo={tempo:.4f},volume={self.dub_volume}[duba]; "
-            f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
-        )
+        if has_orig_audio:
+            filter_complex = (
+                f"[0:a]volume={self.orig_volume:.4f}[bga]; "
+                f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f}[duba]; "
+                f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+            )
+        else:
+            filter_complex = f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f}[aout]"
+
         cmd = [
             "ffmpeg", "-y",
             "-ss", str(seg.start_sec),
