@@ -89,6 +89,33 @@ def get_audio_duration(audio_path: Union[str, Path]) -> float:
         return float(res.stdout.strip())
 
 
+_GPU_ENCODER_PARAMS = None
+
+def get_best_video_encoder_params(target_fps: float) -> List[str]:
+    """Auto-detect the fastest hardware video encoder (NVIDIA NVENC > libx264 ultrafast)."""
+    global _GPU_ENCODER_PARAMS
+    if _GPU_ENCODER_PARAMS is not None:
+        return _GPU_ENCODER_PARAMS + ["-r", str(target_fps)]
+
+    # Test NVIDIA NVENC
+    try:
+        res = subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=s=640x360:d=0.2:r=30", "-c:v", "h264_nvenc", "-pix_fmt", "yuv420p", "-f", "null", "-"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=3,
+        )
+        if res.returncode == 0:
+            _GPU_ENCODER_PARAMS = ["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "22", "-pix_fmt", "yuv420p"]
+            return _GPU_ENCODER_PARAMS + ["-r", str(target_fps)]
+    except Exception:
+        pass
+
+    # Fallback to libx264 ultrafast
+    _GPU_ENCODER_PARAMS = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-pix_fmt", "yuv420p"]
+    return _GPU_ENCODER_PARAMS + ["-r", str(target_fps)]
+
+
 class FFmpegDubbingEngine:
     """
     Main engine to coordinate TTS generation, segment alignment,
@@ -134,8 +161,9 @@ class FFmpegDubbingEngine:
         1. Parse video metadata & build continuous timeline segments (dubbing + gaps).
         2. Generate AI TTS audio for all dubbed subtitles in parallel.
         3. Measure audio durations, compare with user-defined audio & video speed limits.
-        4. Encode segments in parallel via FFmpeg.
-        5. Concat demux all segments into final MP4 video.
+        4. If no video speed change needed: Smart Lossless Stream Copy (-c:v copy) in ~1s!
+           If video speed change needed: GPU NVENC hardware acceleration.
+        5. Output final dubbed MP4 video.
         """
         video_p = Path(video_path).resolve()
         out_p = Path(output_video_path).resolve()
@@ -242,70 +270,143 @@ class FFmpegDubbingEngine:
             for f in concurrent.futures.as_completed(futures):
                 f.result()
 
-        # ---------------------------------------------------------------------
-        # Step 3: Encode each segment in parallel using FFmpeg
-        # ---------------------------------------------------------------------
-        report(45.0, "encode", f"Bắt đầu encode song song {total_segs} segments bằng FFmpeg...")
-        completed_segs = 0
-
-        # Standard video encoding parameters for seamless concat
-        target_fps = 30.0 if video_meta.fps <= 0 else min(60.0, video_meta.fps)
-
-        def task_encode_seg(seg: TimelineSegment) -> str:
-            nonlocal completed_segs
-            out_seg_path = seg_dir / f"seg_{seg.seg_id:04d}.mp4"
-            seg.output_segment_path = str(out_seg_path)
-
-            self._encode_single_segment(
-                video_path=video_p,
-                seg=seg,
-                output_path=out_seg_path,
-                video_meta=video_meta,
-                target_fps=target_fps,
-            )
-
-            completed_segs += 1
-            pct = 45.0 + (completed_segs / max(1, total_segs)) * 45.0
-            report(
-                pct,
-                "encode",
-                f"Đã render segment {completed_segs}/{total_segs} [{seg.seg_type.upper()}] "
-                f"({seg.duration_sec:.1f}s, mode: {seg.sync_mode})",
-                {"seg_id": seg.seg_id, "seg_type": seg.seg_type, "sync_mode": seg.sync_mode},
-            )
-            return str(out_seg_path)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(self.num_workers, 64))) as executor:
-            futures = [executor.submit(task_encode_seg, seg) for seg in timeline_segs]
-            for f in concurrent.futures.as_completed(futures):
-                f.result()
-
         # Sort timeline segments by seg_id
         timeline_segs.sort(key=lambda s: s.seg_id)
 
-        # ---------------------------------------------------------------------
-        # Step 4: Concat Demuxer (-c copy)
-        # ---------------------------------------------------------------------
-        report(92.0, "concat", "Đang ghép nối toàn bộ video bằng FFmpeg Concat Demuxer...")
-        concat_list_path = work_p / "concat_list.txt"
-        with open(concat_list_path, "w", encoding="utf-8") as f:
-            for seg in timeline_segs:
-                if seg.output_segment_path and os.path.exists(seg.output_segment_path):
-                    safe_path = seg.output_segment_path.replace("\\", "/")
-                    f.write(f"file '{safe_path}'\n")
+        # Check if video speed modification is needed
+        has_video_speed_change = any(s.sync_mode == "setpts" for s in timeline_segs)
 
-        concat_cmd = [
-            "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_list_path),
-            "-c", "copy",
-            "-movflags", "+faststart",
-            str(out_p),
-        ]
-        res = subprocess.run(concat_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if res.returncode != 0:
-            raise RuntimeError(f"FFmpeg Concat failed: {res.stderr}")
+        # ---------------------------------------------------------------------
+        # Step 3: Fast Audio-Only Stream Copy OR Full GPU Video Render
+        # ---------------------------------------------------------------------
+        if not has_video_speed_change:
+            # === SUPER FAST LOSSLESS MODE (-c:v copy) ===
+            # Video frames are 100% untouched. Only render audio track and mux in ~1 second!
+            report(45.0, "encode", f"Kích hoạt chế độ Siêu Tốc (Stream Copy - 0s render video)...")
+            completed_auds = 0
+
+            def task_render_audio_seg(seg: TimelineSegment) -> str:
+                nonlocal completed_auds
+                out_aud_path = seg_dir / f"aud_seg_{seg.seg_id:04d}.m4a"
+                seg.output_segment_path = str(out_aud_path)
+
+                self._render_single_audio_segment(
+                    video_path=video_p,
+                    seg=seg,
+                    output_path=out_aud_path,
+                    video_meta=video_meta,
+                )
+
+                completed_auds += 1
+                pct = 45.0 + (completed_auds / max(1, total_segs)) * 45.0
+                report(
+                    pct,
+                    "encode",
+                    f"Đã xử lý audio segment {completed_auds}/{total_segs} [{seg.seg_type.upper()}] ({seg.sync_desc})",
+                    {"seg_id": seg.seg_id, "seg_type": seg.seg_type, "sync_mode": seg.sync_mode},
+                )
+                return str(out_aud_path)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(self.num_workers, 64))) as executor:
+                futures = [executor.submit(task_render_audio_seg, seg) for seg in timeline_segs]
+                for f in concurrent.futures.as_completed(futures):
+                    f.result()
+
+            # Concat all audio segments into a single track
+            report(90.0, "concat", "Đang ghép nối toàn bộ audio lồng tiếng...")
+            concat_list_path = work_p / "concat_audio_list.txt"
+            with open(concat_list_path, "w", encoding="utf-8") as f:
+                for seg in timeline_segs:
+                    if seg.output_segment_path and os.path.exists(seg.output_segment_path):
+                        safe_path = seg.output_segment_path.replace("\\", "/")
+                        f.write(f"file '{safe_path}'\n")
+
+            full_audio_path = work_p / "full_dubbed_audio.m4a"
+            concat_aud_cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(concat_list_path),
+                "-c", "copy",
+                str(full_audio_path),
+            ]
+            subprocess.run(concat_aud_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+
+            # Mux with original video using -c:v copy (Instant!)
+            report(95.0, "mux", "Đang đóng gói video thành phẩm (-c:v copy siêu tốc)...")
+            final_mux_cmd = [
+                "ffmpeg", "-y",
+                "-i", str(video_p),
+                "-i", str(full_audio_path),
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-movflags", "+faststart",
+                str(out_p),
+            ]
+            res = subprocess.run(final_mux_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if res.returncode != 0:
+                raise RuntimeError(f"Fast Mux failed: {res.stderr}")
+
+        else:
+            # === GPU HARDWARE ACCELERATED VIDEO RENDER ===
+            target_fps = 30.0 if video_meta.fps <= 0 else min(60.0, video_meta.fps)
+            v_encoder_params = get_best_video_encoder_params(target_fps)
+            enc_name = v_encoder_params[1]
+            report(45.0, "encode", f"Bắt đầu encode song song {total_segs} segments bằng GPU ({enc_name})...")
+            completed_segs = 0
+
+            def task_encode_seg(seg: TimelineSegment) -> str:
+                nonlocal completed_segs
+                out_seg_path = seg_dir / f"seg_{seg.seg_id:04d}.mp4"
+                seg.output_segment_path = str(out_seg_path)
+
+                self._encode_single_segment(
+                    video_path=video_p,
+                    seg=seg,
+                    output_path=out_seg_path,
+                    video_meta=video_meta,
+                    v_encoder_params=v_encoder_params,
+                )
+
+                completed_segs += 1
+                pct = 45.0 + (completed_segs / max(1, total_segs)) * 45.0
+                report(
+                    pct,
+                    "encode",
+                    f"Đã render segment {completed_segs}/{total_segs} [{seg.seg_type.upper()}] ({seg.sync_desc})",
+                    {"seg_id": seg.seg_id, "seg_type": seg.seg_type, "sync_mode": seg.sync_mode},
+                )
+                return str(out_seg_path)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(self.num_workers, 32))) as executor:
+                futures = [executor.submit(task_encode_seg, seg) for seg in timeline_segs]
+                for f in concurrent.futures.as_completed(futures):
+                    f.result()
+
+            # Concat demuxer
+            report(92.0, "concat", "Đang ghép nối toàn bộ video bằng FFmpeg Concat Demuxer...")
+            concat_list_path = work_p / "concat_list.txt"
+            with open(concat_list_path, "w", encoding="utf-8") as f:
+                for seg in timeline_segs:
+                    if seg.output_segment_path and os.path.exists(seg.output_segment_path):
+                        safe_path = seg.output_segment_path.replace("\\", "/")
+                        f.write(f"file '{safe_path}'\n")
+
+            concat_cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(concat_list_path),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(out_p),
+            ]
+            res = subprocess.run(concat_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if res.returncode != 0:
+                raise RuntimeError(f"FFmpeg Concat failed: {res.stderr}")
 
         report(100.0, "completed", "Hoàn tất! Video đã được lồng tiếng và xuất thành công.", {
             "output_path": str(out_p),
@@ -321,24 +422,162 @@ class FFmpegDubbingEngine:
             "timeline": [s.to_dict() for s in timeline_segs],
         }
 
+    def _render_single_audio_segment(
+        self,
+        video_path: Path,
+        seg: TimelineSegment,
+        output_path: Path,
+        video_meta: VideoMetadata,
+    ):
+        """Render audio-only stream for a single segment (super fast, 0s video encode)."""
+        a_common = [
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ar", "48000",
+            "-ac", "2",
+        ]
+        has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
+
+        if seg.seg_type == "gap":
+            if has_orig_audio:
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", str(seg.start_sec),
+                    "-t", str(seg.duration_sec),
+                    "-i", str(video_path),
+                    "-vn",
+                    "-af", f"volume={self.orig_volume:.4f}",
+                ] + a_common + [str(output_path)]
+            else:
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-f", "lavfi", "-t", str(seg.duration_sec), "-i", "anullsrc=r=48000:cl=stereo",
+                ] + a_common + [str(output_path)]
+
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if res.returncode != 0:
+                raise RuntimeError(f"Failed to render audio GAP segment {seg.seg_id}: {res.stderr}")
+
+        elif seg.seg_type == "dub":
+            audio_p = Path(seg.audio_path)
+
+            if seg.sync_mode == "passthrough":
+                if has_orig_audio:
+                    filter_complex = (
+                        f"[0:a]volume={self.orig_volume:.4f}[bga]; "
+                        f"[1:a]volume={self.dub_volume:.4f}[duba]; "
+                        f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+                    )
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", str(seg.start_sec),
+                        "-t", str(seg.duration_sec),
+                        "-i", str(video_path),
+                        "-i", str(audio_p),
+                        "-vn",
+                        "-filter_complex", filter_complex,
+                        "-map", "[aout]",
+                    ] + a_common + [str(output_path)]
+                else:
+                    filter_complex = f"[1:a]volume={self.dub_volume:.4f},apad[aout]"
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-t", str(seg.duration_sec),
+                        "-i", str(audio_p),
+                        "-vn",
+                        "-filter_complex", filter_complex,
+                        "-map", "[aout]",
+                    ] + a_common + [str(output_path)]
+
+            elif seg.sync_mode == "rubberband":
+                tempo = max(1.0, min(2.0, seg.speed_applied or 1.0))
+                if has_orig_audio:
+                    filter_complex = (
+                        f"[0:a]volume={self.orig_volume:.4f}[bga]; "
+                        f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f}[duba]; "
+                        f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+                    )
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", str(seg.start_sec),
+                        "-t", str(seg.duration_sec),
+                        "-i", str(video_path),
+                        "-i", str(audio_p),
+                        "-vn",
+                        "-filter_complex", filter_complex,
+                        "-map", "[aout]",
+                    ] + a_common + [str(output_path)]
+                else:
+                    filter_complex = f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f},apad[aout]"
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-t", str(seg.duration_sec),
+                        "-i", str(audio_p),
+                        "-vn",
+                        "-filter_complex", filter_complex,
+                        "-map", "[aout]",
+                    ] + a_common + [str(output_path)]
+
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            if res.returncode != 0:
+                if "rubberband" in cmd[cmd.index("-filter_complex") + 1]:
+                    self._retry_audio_with_atempo(video_path, seg, output_path, video_meta)
+                else:
+                    raise RuntimeError(f"Failed to render audio DUB segment {seg.seg_id}: {res.stderr}")
+
+    def _retry_audio_with_atempo(
+        self,
+        video_path: Path,
+        seg: TimelineSegment,
+        output_path: Path,
+        video_meta: VideoMetadata,
+    ):
+        """Fallback audio filter using built-in atempo."""
+        has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
+        tempo = max(1.0, min(2.0, seg.speed_applied or 1.0))
+        audio_p = Path(seg.audio_path)
+        a_common = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+
+        if has_orig_audio:
+            filter_complex = (
+                f"[0:a]volume={self.orig_volume:.4f}[bga]; "
+                f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f}[duba]; "
+                f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+            )
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", str(seg.start_sec),
+                "-t", str(seg.duration_sec),
+                "-i", str(video_path),
+                "-i", str(audio_p),
+                "-vn",
+                "-filter_complex", filter_complex,
+                "-map", "[aout]",
+            ] + a_common + [str(output_path)]
+        else:
+            filter_complex = f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f},apad[aout]"
+            cmd = [
+                "ffmpeg", "-y",
+                "-t", str(seg.duration_sec),
+                "-i", str(audio_p),
+                "-vn",
+                "-filter_complex", filter_complex,
+                "-map", "[aout]",
+            ] + a_common + [str(output_path)]
+
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode != 0:
+            raise RuntimeError(f"Failed retry audio with atempo on segment {seg.seg_id}: {res.stderr}")
+
     def _encode_single_segment(
         self,
         video_path: Path,
         seg: TimelineSegment,
         output_path: Path,
         video_meta: VideoMetadata,
-        target_fps: float,
+        v_encoder_params: List[str],
     ):
-        """Encode a single segment (gap or dub) with normalized streams."""
-        # Common video encoding parameters
-        v_common = [
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-r", str(target_fps),
-            "-preset", "veryfast",
-            "-crf", "20",
-        ]
-        # Common audio encoding parameters
+        """Encode a single segment (gap or dub) with GPU-accelerated video stream."""
         a_common = [
             "-c:a", "aac",
             "-b:a", "192k",
@@ -349,7 +588,6 @@ class FFmpegDubbingEngine:
         has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
 
         if seg.seg_type == "gap":
-            # Gap Segment: Cut original video and audio with 1.0x speed, applying global orig_volume
             if has_orig_audio:
                 filter_complex = f"[0:a]volume={self.orig_volume:.4f}[aout]"
                 cmd = [
@@ -360,9 +598,8 @@ class FFmpegDubbingEngine:
                     "-filter_complex", filter_complex,
                     "-map", "0:v:0",
                     "-map", "[aout]",
-                ] + v_common + a_common + [str(output_path)]
+                ] + v_encoder_params + a_common + [str(output_path)]
             else:
-                # Add silent audio track if original video has no audio or orig_volume is 0 (muted)
                 cmd = [
                     "ffmpeg", "-y",
                     "-ss", str(seg.start_sec),
@@ -371,19 +608,17 @@ class FFmpegDubbingEngine:
                     "-f", "lavfi", "-t", str(seg.duration_sec), "-i", "anullsrc=r=48000:cl=stereo",
                     "-map", "0:v:0",
                     "-map", "1:a:0",
-                ] + v_common + a_common + [str(output_path)]
+                ] + v_encoder_params + a_common + [str(output_path)]
 
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if res.returncode != 0:
                 raise RuntimeError(f"Failed to encode GAP segment {seg.seg_id}: {res.stderr}")
 
         elif seg.seg_type == "dub":
-            # Dub Segment: Apply passthrough (ratio >= 1.0), rubberband (min_ratio <= ratio < 1.0), or setpts (ratio < min_ratio)
             audio_p = Path(seg.audio_path)
             ratio = seg.ratio or 1.0
 
             if seg.sync_mode == "passthrough":
-                # Ratio >= 1.0: AI voice finishes within video segment -> Pristine 1.0x voice, 1.0x video (never slow down voice)
                 if has_orig_audio:
                     filter_complex = (
                         f"[0:a]volume={self.orig_volume:.4f}[bga]; "
@@ -399,7 +634,7 @@ class FFmpegDubbingEngine:
                         "-filter_complex", filter_complex,
                         "-map", "0:v:0",
                         "-map", "[aout]",
-                    ] + v_common + a_common + [str(output_path)]
+                    ] + v_encoder_params + a_common + [str(output_path)]
                 else:
                     filter_complex = f"[1:a]volume={self.dub_volume:.4f},apad[aout]"
                     cmd = [
@@ -411,10 +646,9 @@ class FFmpegDubbingEngine:
                         "-filter_complex", filter_complex,
                         "-map", "0:v:0",
                         "-map", "[aout]",
-                    ] + v_common + a_common + [str(output_path)]
+                    ] + v_encoder_params + a_common + [str(output_path)]
 
             elif seg.sync_mode == "rubberband":
-                # Speed up AI voice within allowed limit (tempo > 1.0), keep video 1.0x
                 tempo = max(1.0, min(2.0, seg.speed_applied or (1.0 / ratio)))
 
                 if has_orig_audio:
@@ -432,7 +666,7 @@ class FFmpegDubbingEngine:
                         "-filter_complex", filter_complex,
                         "-map", "0:v:0",
                         "-map", "[aout]",
-                    ] + v_common + a_common + [str(output_path)]
+                    ] + v_encoder_params + a_common + [str(output_path)]
                 else:
                     filter_complex = f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f},apad[aout]"
                     cmd = [
@@ -444,10 +678,9 @@ class FFmpegDubbingEngine:
                         "-filter_complex", filter_complex,
                         "-map", "0:v:0",
                         "-map", "[aout]",
-                    ] + v_common + a_common + [str(output_path)]
+                    ] + v_encoder_params + a_common + [str(output_path)]
 
             else:
-                # Exceeds max audio speed -> Slow down video (setpts), keep pristine AI voice 1.0x
                 v_speed = seg.video_speed_applied or ratio
                 setpts_factor = 1.0 / max(0.1, v_speed)
 
@@ -468,7 +701,7 @@ class FFmpegDubbingEngine:
                         "-filter_complex", filter_complex,
                         "-map", "[vout]",
                         "-map", "[aout]",
-                    ] + v_common + a_common + [str(output_path)]
+                    ] + v_encoder_params + a_common + [str(output_path)]
                 else:
                     filter_complex = (
                         f"[0:v]setpts={setpts_factor:.4f}*PTS[vout]; "
@@ -483,13 +716,12 @@ class FFmpegDubbingEngine:
                         "-filter_complex", filter_complex,
                         "-map", "[vout]",
                         "-map", "[aout]",
-                    ] + v_common + a_common + [str(output_path)]
+                    ] + v_encoder_params + a_common + [str(output_path)]
 
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             if res.returncode != 0:
-                # If rubberband failed, retry with atempo
                 if "rubberband" in cmd[cmd.index("-filter_complex") + 1]:
-                    self._retry_with_atempo(video_path, seg, output_path, video_meta, target_fps)
+                    self._retry_with_atempo(video_path, seg, output_path, video_meta, v_encoder_params)
                 else:
                     raise RuntimeError(f"Failed to encode DUB segment {seg.seg_id}: {res.stderr}")
 
@@ -499,21 +731,14 @@ class FFmpegDubbingEngine:
         seg: TimelineSegment,
         output_path: Path,
         video_meta: VideoMetadata,
-        target_fps: float,
+        v_encoder_params: List[str],
     ):
         """Fallback filter using built-in atempo if rubberband has library issues."""
         has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
         ratio = seg.ratio or 1.0
         tempo = max(1.0, min(2.0, seg.speed_applied or (1.0 / ratio))) if seg.sync_mode == "rubberband" else 1.0
         audio_p = Path(seg.audio_path)
-
-        v_common = [
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
-            "-r", str(target_fps), "-preset", "veryfast", "-crf", "20",
-        ]
-        a_common = [
-            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-        ]
+        a_common = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
 
         if has_orig_audio:
             filter_complex = (
@@ -533,7 +758,7 @@ class FFmpegDubbingEngine:
             "-filter_complex", filter_complex,
             "-map", "0:v:0",
             "-map", "[aout]",
-        ] + v_common + a_common + [str(output_path)]
+        ] + v_encoder_params + a_common + [str(output_path)]
 
         res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if res.returncode != 0:
