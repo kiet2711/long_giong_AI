@@ -689,6 +689,11 @@ function connectWebSocket(jobId) {
         if (el.floatingJobTitle) el.floatingJobTitle.textContent = '🎉 Đã hoàn tất! Nhấn để tải về.';
         if (el.floatingJobPct) el.floatingJobPct.textContent = '100%';
 
+        // Update state.subtitles with newly shifted timecodes
+        if (msg.result && msg.result.timeline) {
+          updateSubtitlesFromTimeline(msg.result.timeline);
+        }
+
         if (msg.output_url) {
           el.btnDownloadResult.style.display = 'inline-flex';
           el.btnDownloadResult.onclick = () => {
@@ -717,6 +722,45 @@ function connectWebSocket(jobId) {
   ws.onerror = (e) => {
     console.error('WS Error:', e);
   };
+}
+
+// --- Convert Final Timeline to Subtitles List with Synchronized Timecodes ---
+function updateSubtitlesFromTimeline(timeline) {
+  let curTime = 0.0;
+  const newSubs = [];
+  let idx = 1;
+
+  timeline.forEach((seg) => {
+    if (seg.seg_type === 'dub') {
+      const vSpeed = seg.video_speed_applied || 1.0;
+      const segDur = seg.duration_sec / Math.max(0.1, vSpeed);
+      const startT = curTime;
+      const endT = curTime + segDur;
+
+      newSubs.push({
+        index: idx++,
+        start_sec: Math.round(startT * 1000) / 1000,
+        end_sec: Math.round(endT * 1000) / 1000,
+        duration_sec: Math.round(segDur * 1000) / 1000,
+        text_dub: seg.text_dub,
+        text_orig: seg.text_orig,
+        ratio: seg.ratio,
+        sync_mode: seg.sync_mode,
+        speed_applied: seg.speed_applied,
+        video_speed_applied: seg.video_speed_applied,
+        sync_desc: seg.sync_desc,
+      });
+
+      curTime += segDur;
+    } else {
+      curTime += seg.duration_sec;
+    }
+  });
+
+  if (newSubs.length > 0) {
+    state.subtitles = newSubs;
+    renderSubtitleList(state.subtitles);
+  }
 }
 
 // --- Restore active job on page refresh / reopen ---
@@ -759,6 +803,10 @@ function checkAndRestoreActiveJob() {
         }
         if (el.floatingJobTitle) el.floatingJobTitle.textContent = '🎉 Đã hoàn tất! Nhấn để tải về.';
         if (el.floatingJobPct) el.floatingJobPct.textContent = '100%';
+
+        if (job.result && job.result.timeline) {
+          updateSubtitlesFromTimeline(job.result.timeline);
+        }
 
         if (job.output_url) {
           el.btnDownloadResult.style.display = 'inline-flex';

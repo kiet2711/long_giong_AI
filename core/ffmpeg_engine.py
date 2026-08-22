@@ -443,8 +443,16 @@ class FFmpegDubbingEngine:
                 if cpu_res.returncode != 0:
                     raise RuntimeError(f"Single-Pass Video Render failed: {cpu_res.stderr.strip() or 'Unknown error'}")
 
-        report(100.0, "completed", "Hoàn tất! Video đã được lồng tiếng và xuất thành công.", {
+        # Export synchronized SRT file alongside final MP4
+        out_srt_p = out_p.with_suffix(".srt")
+        try:
+            SRTParser.export_synced_srt(timeline_segs, out_srt_p)
+        except Exception as e:
+            logger.warning(f"Could not export synced SRT: {e}")
+
+        report(100.0, "completed", "Hoàn tất! Video & Phụ đề SRT đã được xuất thành công.", {
             "output_path": str(out_p),
+            "output_srt_path": str(out_srt_p) if out_srt_p.exists() else None,
             "total_segments": total_segs,
             "dubbed_segments": total_dubs,
             "timeline": [s.to_dict() for s in timeline_segs],
@@ -452,6 +460,7 @@ class FFmpegDubbingEngine:
 
         return {
             "output_path": str(out_p),
+            "output_srt_path": str(out_srt_p) if out_srt_p.exists() else None,
             "total_segments": total_segs,
             "dubbed_segments": total_dubs,
             "timeline": [s.to_dict() for s in timeline_segs],
