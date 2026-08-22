@@ -478,6 +478,7 @@ class FFmpegDubbingEngine:
         # Check if video speed modification is needed
         has_video_speed_change = any(abs((s.video_speed_applied or 1.0) - 1.0) > 0.01 for s in timeline_segs)
         has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
+        video_slices = coalesce_timeline_slices(timeline_segs) if has_video_speed_change else []
 
         # ---------------------------------------------------------------------
         # Step 3.1: Render AI voice segments in parallel
@@ -533,29 +534,62 @@ class FFmpegDubbingEngine:
         subprocess.run(concat_voice_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
 
         # ---------------------------------------------------------------------
-        # Step 3.2: Extract background audio track and adjust volume for entire track in 1 go
+        # Step 3.2: Extract & synchronize background audio track (100% frame-accurate)
         # ---------------------------------------------------------------------
         full_audio_path = work_p / "full_dubbed_audio.wav"
 
         if has_orig_audio:
             vol_pct = int(self.orig_volume * 100)
-            report(75.0, "audio_render", f"Đang hạ âm lượng toàn bộ track âm thanh gốc ({vol_pct}%) và hòa âm...")
+            report(75.0, "audio_render", f"Đang đồng bộ hóa track âm thanh nền ({vol_pct}%) theo dòng thời gian...")
             bg_audio_path = work_p / "full_bg_audio.wav"
 
-            # Extract entire video audio track and lower volume in 1 single command (lightning fast!)
-            extract_bg_cmd = [
-                "ffmpeg", "-y",
-                "-i", str(video_p),
-                "-vn",
-                "-af", f"volume={self.orig_volume:.4f},aresample=48000:async=1",
-                "-c:a", "pcm_s16le",
-                "-ar", "48000",
-                "-ac", "2",
-                str(bg_audio_path),
-            ]
-            subprocess.run(extract_bg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
+            if not has_video_speed_change:
+                # Fast 1-pass extraction for 1.0x constant speed
+                extract_bg_cmd = [
+                    "ffmpeg", "-y",
+                    "-i", str(video_p),
+                    "-vn",
+                    "-af", f"volume={self.orig_volume:.4f},aresample=48000:async=1",
+                    "-c:a", "pcm_s16le",
+                    "-ar", "48000",
+                    "-ac", "2",
+                    str(bg_audio_path),
+                ]
+                subprocess.run(extract_bg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
+            else:
+                # Synchronize background audio slices matching the exact stretched video slices
+                bg_slice_dir = work_p / "bg_slices"
+                bg_slice_dir.mkdir(parents=True, exist_ok=True)
+                bg_slice_files: List[Path] = [bg_slice_dir / f"bg_slice_{s.slice_id:04d}.wav" for s in video_slices]
 
-            # Mix lowered background track + AI voice track in 1 single command
+                def task_render_bg_slice(s: VideoSlice):
+                    out_f = bg_slice_dir / f"bg_slice_{s.slice_id:04d}.wav"
+                    self._render_bg_audio_slice(video_p, s, out_f)
+                    return out_f
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(self.num_workers, 16))) as executor:
+                    futures = [executor.submit(task_render_bg_slice, s) for s in video_slices]
+                    for f in concurrent.futures.as_completed(futures):
+                        f.result()
+
+                concat_bg_list = work_p / "concat_bg_slices.txt"
+                with open(concat_bg_list, "w", encoding="utf-8") as f:
+                    for bf in bg_slice_files:
+                        if bf.exists():
+                            safe_p = Path(bf).resolve().as_posix()
+                            f.write(f"file '{safe_p}'\n")
+
+                concat_bg_cmd = [
+                    "ffmpeg", "-y",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", str(concat_bg_list),
+                    "-c:a", "pcm_s16le",
+                    str(bg_audio_path),
+                ]
+                subprocess.run(concat_bg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
+
+            # Mix lowered & synced background track + AI voice track
             mix_cmd = [
                 "ffmpeg", "-y",
                 "-i", str(bg_audio_path),
@@ -596,7 +630,6 @@ class FFmpegDubbingEngine:
         else:
             # === INTELLIGENT TIMELINE SLICE ENCODING (CAPCUT-STYLE) ===
             # 1. Coalesce adjacent segments with identical speed into contiguous slices
-            video_slices = coalesce_timeline_slices(timeline_segs)
             total_slices = len(video_slices)
             target_fps = 30.0 if video_meta.fps <= 0 else min(60.0, video_meta.fps)
             enc_name, v_encoder_params = get_best_video_encoder_params(target_fps)
@@ -796,3 +829,48 @@ class FFmpegDubbingEngine:
                 "-af", filter_str,
             ] + a_common + [str(output_path)]
             subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
+
+    def _render_bg_audio_slice(
+        self,
+        video_p: Path,
+        v_slice: VideoSlice,
+        output_path: Path,
+    ):
+        """Render background audio for a single coalesced slice matching exact video speed & duration."""
+        target_dur = v_slice.output_duration_sec
+        a_common = ["-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]
+
+        if abs(v_slice.speed - 1.0) < 0.005:
+            # 1.0x normal speed: exact cut + volume + pad/trim
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{v_slice.start_sec:.3f}",
+                "-to", f"{v_slice.end_sec:.3f}",
+                "-i", str(video_p),
+                "-vn",
+                "-af", f"volume={self.orig_volume:.4f},aresample=48000:async=1,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}",
+            ] + a_common + [str(output_path)]
+        else:
+            # Speed modification: stretch audio tempo to match stretched video slice duration
+            tempo = max(0.25, min(4.0, v_slice.speed))
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{v_slice.start_sec:.3f}",
+                "-to", f"{v_slice.end_sec:.3f}",
+                "-i", str(video_p),
+                "-vn",
+                "-af", f"volume={self.orig_volume:.4f},rubberband=tempo={tempo:.4f},aresample=48000:async=1,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}",
+            ] + a_common + [str(output_path)]
+
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+        if res.returncode != 0:
+            tempo = max(0.5, min(2.0, v_slice.speed))
+            fallback_cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{v_slice.start_sec:.3f}",
+                "-to", f"{v_slice.end_sec:.3f}",
+                "-i", str(video_p),
+                "-vn",
+                "-af", f"volume={self.orig_volume:.4f},atempo={tempo:.4f},aresample=48000:async=1,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}",
+            ] + a_common + [str(output_path)]
+            subprocess.run(fallback_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
