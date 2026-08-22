@@ -1,7 +1,7 @@
 """
 High-performance FFmpeg Dubbing & Sync Engine.
-Handles audio stretching (rubberband/atempo), video speed adjusting (setpts),
-lightning-fast full-track background audio volume scaling, and instant concat demuxing.
+Handles audio stretching (rubberband/atempo), intelligent timeline slice coalescing,
+parallel hardware-accelerated segment encoding (NVIDIA NVENC / CPU), and instant concat demuxing.
 """
 
 import concurrent.futures
@@ -31,6 +31,22 @@ class VideoMetadata:
     height: int
     fps: float
     has_audio: bool
+
+
+@dataclass
+class VideoSlice:
+    slice_id: int
+    start_sec: float
+    end_sec: float
+    speed: float
+
+    @property
+    def duration_sec(self) -> float:
+        return max(0.01, self.end_sec - self.start_sec)
+
+    @property
+    def output_duration_sec(self) -> float:
+        return self.duration_sec / max(0.1, self.speed)
 
 
 def get_video_metadata(video_path: Union[str, Path]) -> VideoMetadata:
@@ -105,15 +121,53 @@ def create_silence_wav(output_path: Union[str, Path], duration_sec: float, sampl
         wf.writeframes(data)
 
 
+def coalesce_timeline_slices(timeline_segs: List[TimelineSegment]) -> List[VideoSlice]:
+    """
+    Merge consecutive timeline segments that share identical video speed into contiguous video slices.
+    Reduces thousands of individual subtitle cuts into just ~20-50 continuous video slices!
+    """
+    if not timeline_segs:
+        return []
+
+    slices: List[VideoSlice] = []
+    current_speed = round(timeline_segs[0].video_speed_applied or 1.0, 3)
+    current_start = timeline_segs[0].start_sec
+    current_end = timeline_segs[0].end_sec
+
+    for seg in timeline_segs[1:]:
+        seg_speed = round(seg.video_speed_applied or 1.0, 3)
+        # If speed is virtually identical and timeline is contiguous
+        if abs(seg_speed - current_speed) < 0.005 and abs(seg.start_sec - current_end) < 0.05:
+            current_end = seg.end_sec
+        else:
+            slices.append(VideoSlice(
+                slice_id=len(slices),
+                start_sec=current_start,
+                end_sec=current_end,
+                speed=current_speed,
+            ))
+            current_speed = seg_speed
+            current_start = seg.start_sec
+            current_end = seg.end_sec
+
+    slices.append(VideoSlice(
+        slice_id=len(slices),
+        start_sec=current_start,
+        end_sec=current_end,
+        speed=current_speed,
+    ))
+    return slices
+
+
 _GPU_ENCODER_PARAMS = None
 _GPU_SEMAPHORE = threading.Semaphore(4)
 
 
-def get_best_video_encoder_params(target_fps: float) -> List[str]:
+def get_best_video_encoder_params(target_fps: float) -> Tuple[str, List[str]]:
     """Auto-detect the fastest hardware video encoder (NVIDIA NVENC > libx264 ultrafast)."""
     global _GPU_ENCODER_PARAMS
     if _GPU_ENCODER_PARAMS is not None:
-        return _GPU_ENCODER_PARAMS + ["-r", str(target_fps)]
+        return _GPU_ENCODER_PARAMS[0], _GPU_ENCODER_PARAMS[1] + ["-r", str(target_fps)]
 
     # Test NVIDIA NVENC
     try:
@@ -124,20 +178,22 @@ def get_best_video_encoder_params(target_fps: float) -> List[str]:
             timeout=3,
         )
         if res.returncode == 0:
-            _GPU_ENCODER_PARAMS = ["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "22", "-pix_fmt", "yuv420p"]
-            return _GPU_ENCODER_PARAMS + ["-r", str(target_fps)]
+            params = ["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "23", "-b:v", "0", "-pix_fmt", "yuv420p"]
+            _GPU_ENCODER_PARAMS = ("h264_nvenc", params)
+            return "h264_nvenc", params + ["-r", str(target_fps)]
     except Exception:
         pass
 
     # Fallback to libx264 ultrafast
-    _GPU_ENCODER_PARAMS = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-pix_fmt", "yuv420p"]
-    return _GPU_ENCODER_PARAMS + ["-r", str(target_fps)]
+    params = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22", "-pix_fmt", "yuv420p"]
+    _GPU_ENCODER_PARAMS = ("libx264", params)
+    return "libx264", params + ["-r", str(target_fps)]
 
 
 class FFmpegDubbingEngine:
     """
     Main engine to coordinate TTS generation, segment alignment,
-    rapid parallel voice rendering, full-track background mixing, and final concatenation.
+    rapid parallel voice rendering, full-track background mixing, and high-performance video timeline encoding.
     """
 
     def __init__(
@@ -179,7 +235,7 @@ class FFmpegDubbingEngine:
         2. Generate AI TTS audio for all dubbed subtitles in parallel (with caching).
         3. Build AI voice track (instant Python silence for gaps, lightweight audio filters for dubs).
         4. Lower original background audio for entire track in 1 go & mix tracks.
-        5. Lossless Stream Copy (-c:v copy) or GPU single-pass render for final video.
+        5. Lossless Stream Copy (-c:v copy) or GPU parallel timeline slices for final video.
         """
         video_p = Path(video_path).resolve()
         out_p = Path(output_video_path).resolve()
@@ -462,7 +518,7 @@ class FFmpegDubbingEngine:
         with open(concat_list_path, "w", encoding="utf-8") as f:
             for seg in timeline_segs:
                 if seg.output_segment_path and os.path.exists(seg.output_segment_path):
-                    safe_path = seg.output_segment_path.replace("\\", "/")
+                    safe_path = Path(seg.output_segment_path).resolve().as_posix()
                     f.write(f"file '{safe_path}'\n")
 
         full_voice_path = work_p / "full_voice_ai.wav"
@@ -474,7 +530,7 @@ class FFmpegDubbingEngine:
             "-c:a", "pcm_s16le",
             str(full_voice_path),
         ]
-        subprocess.run(concat_voice_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        subprocess.run(concat_voice_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
 
         # ---------------------------------------------------------------------
         # Step 3.2: Extract background audio track and adjust volume for entire track in 1 go
@@ -497,7 +553,7 @@ class FFmpegDubbingEngine:
                 "-ac", "2",
                 str(bg_audio_path),
             ]
-            subprocess.run(extract_bg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            subprocess.run(extract_bg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
 
             # Mix lowered background track + AI voice track in 1 single command
             mix_cmd = [
@@ -510,13 +566,13 @@ class FFmpegDubbingEngine:
                 "-ac", "2",
                 str(full_audio_path),
             ]
-            subprocess.run(mix_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            subprocess.run(mix_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
         else:
             # If no original audio or orig_volume == 0, full audio track is directly the full voice track
             full_audio_path = full_voice_path
 
         # ---------------------------------------------------------------------
-        # Step 4: Single-Pass Video Pipeline (Stream Copy OR Single-Pass FilterGraph)
+        # Step 4: High-Speed Timeline Video Pipeline
         # ---------------------------------------------------------------------
         if not has_video_speed_change:
             # === SUPER FAST LOSSLESS MODE (-c:v copy) ===
@@ -533,67 +589,131 @@ class FFmpegDubbingEngine:
                 "-movflags", "+faststart",
                 str(out_p),
             ]
-            res = subprocess.run(final_mux_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            res = subprocess.run(final_mux_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
             if res.returncode != 0:
                 raise RuntimeError(f"Fast Stream Copy Mux failed: {res.stderr.strip() or 'Unknown error'}")
 
         else:
-            # === SINGLE-PASS FILTERGRAPH PIPELINE ===
+            # === INTELLIGENT TIMELINE SLICE ENCODING (CAPCUT-STYLE) ===
+            # 1. Coalesce adjacent segments with identical speed into contiguous slices
+            video_slices = coalesce_timeline_slices(timeline_segs)
+            total_slices = len(video_slices)
             target_fps = 30.0 if video_meta.fps <= 0 else min(60.0, video_meta.fps)
-            v_encoder_params = get_best_video_encoder_params(target_fps)
-            enc_name = v_encoder_params[1]
-            report(80.0, "video_render", f"Đang render Video toàn bộ trong 1 lệnh duy nhất bằng GPU ({enc_name})...")
+            enc_name, v_encoder_params = get_best_video_encoder_params(target_fps)
 
-            # Build in-graph filter script
-            filter_lines = []
-            concat_tags = []
-            for i, seg in enumerate(timeline_segs):
-                v_speed = seg.video_speed_applied or 1.0
-                pts_factor = 1.0 / max(0.1, v_speed)
-                if abs(pts_factor - 1.0) < 0.001:
-                    filter_lines.append(f"[0:v]trim=start={seg.start_sec:.3f}:end={seg.end_sec:.3f},setpts=PTS-STARTPTS[v{i}];")
+            report(80.0, "video_render", f"Gộp {total_segs} đoạn thành {total_slices} phân đoạn video liên tục. Bắt đầu render GPU ({enc_name})...")
+
+            slice_ts_dir = work_p / "video_slices"
+            slice_ts_dir.mkdir(parents=True, exist_ok=True)
+            slice_files: List[Path] = [slice_ts_dir / f"v_slice_{s.slice_id:04d}.ts" for s in video_slices]
+            completed_slices = 0
+
+            def encode_slice_task(v_slice: VideoSlice) -> Path:
+                nonlocal completed_slices
+                slice_out = slice_ts_dir / f"v_slice_{v_slice.slice_id:04d}.ts"
+
+                pts_factor = 1.0 / max(0.1, v_slice.speed)
+                is_speed_1 = abs(pts_factor - 1.0) < 0.001
+
+                if is_speed_1:
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", f"{v_slice.start_sec:.3f}",
+                        "-to", f"{v_slice.end_sec:.3f}",
+                        "-i", str(video_p),
+                        "-an",
+                    ] + v_encoder_params + [
+                        "-f", "mpegts",
+                        str(slice_out),
+                    ]
                 else:
-                    filter_lines.append(f"[0:v]trim=start={seg.start_sec:.3f}:end={seg.end_sec:.3f},setpts={pts_factor:.4f}*(PTS-STARTPTS)[v{i}];")
-                concat_tags.append(f"[v{i}]")
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", f"{v_slice.start_sec:.3f}",
+                        "-to", f"{v_slice.end_sec:.3f}",
+                        "-i", str(video_p),
+                        "-vf", f"setpts={pts_factor:.4f}*(PTS-STARTPTS)",
+                        "-an",
+                    ] + v_encoder_params + [
+                        "-f", "mpegts",
+                        str(slice_out),
+                    ]
 
-            filter_lines.append(f"{''.join(concat_tags)}concat=n={len(timeline_segs)}:v=1:a=0[vout]")
-            video_filter_script = work_p / "video_filter_complex.txt"
-            video_filter_script.write_text("\n".join(filter_lines), encoding="utf-8")
+                is_gpu = "nvenc" in enc_name
+                if is_gpu:
+                    with _GPU_SEMAPHORE:
+                        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+                else:
+                    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
 
-            single_pass_cmd = [
+                if res.returncode != 0:
+                    # Fallback CPU ultrafast for this slice if GPU failed
+                    cpu_params = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22", "-pix_fmt", "yuv420p", "-r", str(target_fps)]
+                    if is_speed_1:
+                        fallback_cmd = [
+                            "ffmpeg", "-y",
+                            "-ss", f"{v_slice.start_sec:.3f}",
+                            "-to", f"{v_slice.end_sec:.3f}",
+                            "-i", str(video_p),
+                            "-an",
+                        ] + cpu_params + ["-f", "mpegts", str(slice_out)]
+                    else:
+                        fallback_cmd = [
+                            "ffmpeg", "-y",
+                            "-ss", f"{v_slice.start_sec:.3f}",
+                            "-to", f"{v_slice.end_sec:.3f}",
+                            "-i", str(video_p),
+                            "-vf", f"setpts={pts_factor:.4f}*(PTS-STARTPTS)",
+                            "-an",
+                        ] + cpu_params + ["-f", "mpegts", str(slice_out)]
+                    fb_res = subprocess.run(fallback_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+                    if fb_res.returncode != 0:
+                        raise RuntimeError(f"Failed to encode video slice #{v_slice.slice_id}: {fb_res.stderr.strip()}")
+
+                completed_slices += 1
+                pct = 80.0 + (completed_slices / max(1, total_slices)) * 18.0
+                speed_str = f"{v_slice.speed:.2f}x"
+                report(
+                    pct,
+                    "video_render",
+                    f"Đã render phân đoạn video {completed_slices}/{total_slices} ({v_slice.start_sec:.1f}s - {v_slice.end_sec:.1f}s @ {speed_str})",
+                    {"slice_id": v_slice.slice_id, "speed": v_slice.speed},
+                )
+                return slice_out
+
+            # Encode coalesced video slices in parallel with GPU NVENC (up to 4 GPU streams)
+            max_enc_workers = max(1, min(self.num_workers, 8))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_enc_workers) as executor:
+                futures = [executor.submit(encode_slice_task, s) for s in video_slices]
+                for f in concurrent.futures.as_completed(futures):
+                    f.result()
+
+            # Concat all .ts video slices losslessly and mux with full dubbed audio track
+            report(98.0, "concat_video", "Đang ghép nối toàn bộ phân đoạn video và hoàn thiện file MP4...")
+            concat_slices_list = work_p / "concat_slices_list.txt"
+            with open(concat_slices_list, "w", encoding="utf-8") as f:
+                for sf in slice_files:
+                    if sf.exists():
+                        safe_path = Path(sf).resolve().as_posix()
+                        f.write(f"file '{safe_path}'\n")
+
+            final_mux_cmd = [
                 "ffmpeg", "-y",
-                "-i", str(video_p),
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(concat_slices_list),
                 "-i", str(full_audio_path),
-                "-filter_complex_script", str(video_filter_script),
-                "-map", "[vout]",
+                "-map", "0:v:0",
                 "-map", "1:a:0",
-            ] + v_encoder_params + [
+                "-c:v", "copy",
                 "-c:a", "aac",
                 "-b:a", "192k",
                 "-movflags", "+faststart",
                 str(out_p),
             ]
-
-            res = subprocess.run(single_pass_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+            res = subprocess.run(final_mux_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
             if res.returncode != 0:
-                report(85.0, "video_render", "GPU bận, chuyển sang chế độ CPU Ultrafast Single-Pass...")
-                cpu_v_params = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-pix_fmt", "yuv420p", "-r", str(target_fps)]
-                cpu_cmd = [
-                    "ffmpeg", "-y",
-                    "-i", str(video_p),
-                    "-i", str(full_audio_path),
-                    "-filter_complex_script", str(video_filter_script),
-                    "-map", "[vout]",
-                    "-map", "1:a:0",
-                ] + cpu_v_params + [
-                    "-c:a", "aac",
-                    "-b:a", "192k",
-                    "-movflags", "+faststart",
-                    str(out_p),
-                ]
-                cpu_res = subprocess.run(cpu_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-                if cpu_res.returncode != 0:
-                    raise RuntimeError(f"Single-Pass Video Render failed: {cpu_res.stderr.strip() or 'Unknown error'}")
+                raise RuntimeError(f"Failed to concat video slices: {res.stderr.strip() or 'Unknown error'}")
 
         # Export synchronized SRT file alongside final MP4
         out_srt_p = out_p.with_suffix(".srt")
@@ -665,7 +785,7 @@ class FFmpegDubbingEngine:
                     "-vn",
                     "-af", filter_str,
                 ] + a_common + [str(output_path)]
-                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
         else:
             # Passthrough 1.0x with volume and sample-accurate pad/trim
             filter_str = f"volume={self.dub_volume:.4f},aresample=48000:async=1,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}"
@@ -675,4 +795,4 @@ class FFmpegDubbingEngine:
                 "-vn",
                 "-af", filter_str,
             ] + a_common + [str(output_path)]
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
