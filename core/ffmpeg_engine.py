@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -90,6 +91,7 @@ def get_audio_duration(audio_path: Union[str, Path]) -> float:
 
 
 _GPU_ENCODER_PARAMS = None
+_GPU_SEMAPHORE = threading.Semaphore(4)
 
 def get_best_video_encoder_params(target_fps: float) -> List[str]:
     """Auto-detect the fastest hardware video encoder (NVIDIA NVENC > libx264 ultrafast)."""
@@ -446,7 +448,7 @@ class FFmpegDubbingEngine:
                     "-t", str(seg.duration_sec),
                     "-i", str(video_path),
                     "-vn",
-                    "-af", f"volume={self.orig_volume:.4f}",
+                    "-af", f"volume={self.orig_volume:.4f},aresample=48000:async=1",
                 ] + a_common + [str(output_path)]
             else:
                 cmd = [
@@ -454,9 +456,9 @@ class FFmpegDubbingEngine:
                     "-f", "lavfi", "-t", str(seg.duration_sec), "-i", "anullsrc=r=48000:cl=stereo",
                 ] + a_common + [str(output_path)]
 
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
             if res.returncode != 0:
-                raise RuntimeError(f"Failed to render audio GAP segment {seg.seg_id}: {res.stderr}")
+                raise RuntimeError(f"Failed to render audio GAP segment {seg.seg_id}: {res.stderr.strip() or 'Unknown error'}")
 
         elif seg.seg_type == "dub":
             audio_p = Path(seg.audio_path)
@@ -464,8 +466,8 @@ class FFmpegDubbingEngine:
             if seg.sync_mode == "passthrough":
                 if has_orig_audio:
                     filter_complex = (
-                        f"[0:a]volume={self.orig_volume:.4f}[bga]; "
-                        f"[1:a]volume={self.dub_volume:.4f}[duba]; "
+                        f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1[bga]; "
+                        f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1[duba]; "
                         f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
                     )
                     cmd = [
@@ -479,7 +481,7 @@ class FFmpegDubbingEngine:
                         "-map", "[aout]",
                     ] + a_common + [str(output_path)]
                 else:
-                    filter_complex = f"[1:a]volume={self.dub_volume:.4f},apad[aout]"
+                    filter_complex = f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1,apad[aout]"
                     cmd = [
                         "ffmpeg", "-y",
                         "-t", str(seg.duration_sec),
@@ -493,8 +495,8 @@ class FFmpegDubbingEngine:
                 tempo = max(1.0, min(2.0, seg.speed_applied or 1.0))
                 if has_orig_audio:
                     filter_complex = (
-                        f"[0:a]volume={self.orig_volume:.4f}[bga]; "
-                        f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f}[duba]; "
+                        f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1[bga]; "
+                        f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1[duba]; "
                         f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
                     )
                     cmd = [
@@ -508,7 +510,7 @@ class FFmpegDubbingEngine:
                         "-map", "[aout]",
                     ] + a_common + [str(output_path)]
                 else:
-                    filter_complex = f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f},apad[aout]"
+                    filter_complex = f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1,apad[aout]"
                     cmd = [
                         "ffmpeg", "-y",
                         "-t", str(seg.duration_sec),
@@ -518,12 +520,9 @@ class FFmpegDubbingEngine:
                         "-map", "[aout]",
                     ] + a_common + [str(output_path)]
 
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
             if res.returncode != 0:
-                if "rubberband" in cmd[cmd.index("-filter_complex") + 1]:
-                    self._retry_audio_with_atempo(video_path, seg, output_path, video_meta)
-                else:
-                    raise RuntimeError(f"Failed to render audio DUB segment {seg.seg_id}: {res.stderr}")
+                self._retry_audio_with_atempo(video_path, seg, output_path, video_meta)
 
     def _retry_audio_with_atempo(
         self,
@@ -540,8 +539,8 @@ class FFmpegDubbingEngine:
 
         if has_orig_audio:
             filter_complex = (
-                f"[0:a]volume={self.orig_volume:.4f}[bga]; "
-                f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f}[duba]; "
+                f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1[bga]; "
+                f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1[duba]; "
                 f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
             )
             cmd = [
@@ -555,7 +554,7 @@ class FFmpegDubbingEngine:
                 "-map", "[aout]",
             ] + a_common + [str(output_path)]
         else:
-            filter_complex = f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f},apad[aout]"
+            filter_complex = f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1,apad[aout]"
             cmd = [
                 "ffmpeg", "-y",
                 "-t", str(seg.duration_sec),
@@ -565,9 +564,9 @@ class FFmpegDubbingEngine:
                 "-map", "[aout]",
             ] + a_common + [str(output_path)]
 
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
         if res.returncode != 0:
-            raise RuntimeError(f"Failed retry audio with atempo on segment {seg.seg_id}: {res.stderr}")
+            raise RuntimeError(f"Failed to render audio segment {seg.seg_id}: {res.stderr.strip() or 'Unknown error'}")
 
     def _encode_single_segment(
         self,
@@ -578,6 +577,7 @@ class FFmpegDubbingEngine:
         v_encoder_params: List[str],
     ):
         """Encode a single segment (gap or dub) with GPU-accelerated video stream."""
+        target_fps = 30.0 if video_meta.fps <= 0 else min(60.0, video_meta.fps)
         a_common = [
             "-c:a", "aac",
             "-b:a", "192k",
@@ -589,7 +589,7 @@ class FFmpegDubbingEngine:
 
         if seg.seg_type == "gap":
             if has_orig_audio:
-                filter_complex = f"[0:a]volume={self.orig_volume:.4f}[aout]"
+                filter_complex = f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1[aout]"
                 cmd = [
                     "ffmpeg", "-y",
                     "-ss", str(seg.start_sec),
@@ -610,9 +610,15 @@ class FFmpegDubbingEngine:
                     "-map", "1:a:0",
                 ] + v_encoder_params + a_common + [str(output_path)]
 
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            is_gpu = any("nvenc" in p or "qsv" in p for p in v_encoder_params)
+            if is_gpu:
+                with _GPU_SEMAPHORE:
+                    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+            else:
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+
             if res.returncode != 0:
-                raise RuntimeError(f"Failed to encode GAP segment {seg.seg_id}: {res.stderr}")
+                self._retry_with_cpu_atempo(video_path, seg, output_path, video_meta, target_fps)
 
         elif seg.seg_type == "dub":
             audio_p = Path(seg.audio_path)
@@ -621,8 +627,8 @@ class FFmpegDubbingEngine:
             if seg.sync_mode == "passthrough":
                 if has_orig_audio:
                     filter_complex = (
-                        f"[0:a]volume={self.orig_volume:.4f}[bga]; "
-                        f"[1:a]volume={self.dub_volume:.4f}[duba]; "
+                        f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1[bga]; "
+                        f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1[duba]; "
                         f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
                     )
                     cmd = [
@@ -636,7 +642,7 @@ class FFmpegDubbingEngine:
                         "-map", "[aout]",
                     ] + v_encoder_params + a_common + [str(output_path)]
                 else:
-                    filter_complex = f"[1:a]volume={self.dub_volume:.4f},apad[aout]"
+                    filter_complex = f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1,apad[aout]"
                     cmd = [
                         "ffmpeg", "-y",
                         "-ss", str(seg.start_sec),
@@ -653,8 +659,8 @@ class FFmpegDubbingEngine:
 
                 if has_orig_audio:
                     filter_complex = (
-                        f"[0:a]volume={self.orig_volume:.4f}[bga]; "
-                        f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f}[duba]; "
+                        f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1[bga]; "
+                        f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1[duba]; "
                         f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
                     )
                     cmd = [
@@ -668,7 +674,7 @@ class FFmpegDubbingEngine:
                         "-map", "[aout]",
                     ] + v_encoder_params + a_common + [str(output_path)]
                 else:
-                    filter_complex = f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f},apad[aout]"
+                    filter_complex = f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1,apad[aout]"
                     cmd = [
                         "ffmpeg", "-y",
                         "-ss", str(seg.start_sec),
@@ -688,9 +694,9 @@ class FFmpegDubbingEngine:
                     bg_tempo = max(0.25, min(4.0, v_speed))
                     filter_complex = (
                         f"[0:v]setpts={setpts_factor:.4f}*PTS[vout]; "
-                        f"[0:a]volume={self.orig_volume:.4f},rubberband=tempo={bg_tempo:.4f}[bga]; "
-                        f"[1:a]volume={self.dub_volume:.4f}[duba]; "
-                        f"[bga][duba]amix=inputs=2:duration=second:dropout_transition=0[aout]"
+                        f"[0:a]volume={self.orig_volume:.4f},rubberband=tempo={bg_tempo:.4f},aresample=48000:async=1[bga]; "
+                        f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1[duba]; "
+                        f"[bga][duba]amix=inputs=2:duration=longest:dropout_transition=0[aout]"
                     )
                     cmd = [
                         "ffmpeg", "-y",
@@ -705,7 +711,7 @@ class FFmpegDubbingEngine:
                 else:
                     filter_complex = (
                         f"[0:v]setpts={setpts_factor:.4f}*PTS[vout]; "
-                        f"[1:a]volume={self.dub_volume:.4f}[aout]"
+                        f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1[aout]"
                     )
                     cmd = [
                         "ffmpeg", "-y",
@@ -718,48 +724,159 @@ class FFmpegDubbingEngine:
                         "-map", "[aout]",
                     ] + v_encoder_params + a_common + [str(output_path)]
 
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            if res.returncode != 0:
-                if "rubberband" in cmd[cmd.index("-filter_complex") + 1]:
-                    self._retry_with_atempo(video_path, seg, output_path, video_meta, v_encoder_params)
-                else:
-                    raise RuntimeError(f"Failed to encode DUB segment {seg.seg_id}: {res.stderr}")
+            is_gpu = any("nvenc" in p or "qsv" in p for p in v_encoder_params)
+            if is_gpu:
+                with _GPU_SEMAPHORE:
+                    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+            else:
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
 
-    def _retry_with_atempo(
+            if res.returncode != 0:
+                self._retry_with_cpu_atempo(video_path, seg, output_path, video_meta, target_fps)
+
+    def _retry_with_cpu_atempo(
         self,
         video_path: Path,
         seg: TimelineSegment,
         output_path: Path,
         video_meta: VideoMetadata,
-        v_encoder_params: List[str],
+        target_fps: float,
     ):
-        """Fallback filter using built-in atempo if rubberband has library issues."""
+        """Ultra-reliable CPU fallback filter using libx264 ultrafast and atempo."""
         has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
         ratio = seg.ratio or 1.0
-        tempo = max(1.0, min(2.0, seg.speed_applied or (1.0 / ratio))) if seg.sync_mode == "rubberband" else 1.0
-        audio_p = Path(seg.audio_path)
+        audio_p = Path(seg.audio_path) if seg.audio_path else None
+
+        v_common = [
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "20",
+            "-pix_fmt", "yuv420p",
+            "-r", str(target_fps),
+        ]
         a_common = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
 
-        if has_orig_audio:
-            filter_complex = (
-                f"[0:a]volume={self.orig_volume:.4f}[bga]; "
-                f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f}[duba]; "
-                f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
-            )
+        if seg.seg_type == "gap" or not audio_p or not audio_p.exists():
+            if has_orig_audio:
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", str(seg.start_sec),
+                    "-t", str(seg.duration_sec),
+                    "-i", str(video_path),
+                    "-filter_complex", f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1[aout]",
+                    "-map", "0:v:0",
+                    "-map", "[aout]",
+                ] + v_common + a_common + [str(output_path)]
+            else:
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", str(seg.start_sec),
+                    "-t", str(seg.duration_sec),
+                    "-i", str(video_path),
+                    "-f", "lavfi", "-t", str(seg.duration_sec), "-i", "anullsrc=r=48000:cl=stereo",
+                    "-map", "0:v:0",
+                    "-map", "1:a:0",
+                ] + v_common + a_common + [str(output_path)]
         else:
-            filter_complex = f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f},apad[aout]"
+            if seg.sync_mode == "passthrough":
+                if has_orig_audio:
+                    filter_complex = (
+                        f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1[bga]; "
+                        f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1[duba]; "
+                        f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+                    )
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", str(seg.start_sec),
+                        "-t", str(seg.duration_sec),
+                        "-i", str(video_path),
+                        "-i", str(audio_p),
+                        "-filter_complex", filter_complex,
+                        "-map", "0:v:0",
+                        "-map", "[aout]",
+                    ] + v_common + a_common + [str(output_path)]
+                else:
+                    filter_complex = f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1,apad[aout]"
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", str(seg.start_sec),
+                        "-t", str(seg.duration_sec),
+                        "-i", str(video_path),
+                        "-i", str(audio_p),
+                        "-filter_complex", filter_complex,
+                        "-map", "0:v:0",
+                        "-map", "[aout]",
+                    ] + v_common + a_common + [str(output_path)]
 
-        cmd = [
-            "ffmpeg", "-y",
-            "-ss", str(seg.start_sec),
-            "-t", str(seg.duration_sec),
-            "-i", str(video_path),
-            "-i", str(audio_p),
-            "-filter_complex", filter_complex,
-            "-map", "0:v:0",
-            "-map", "[aout]",
-        ] + v_encoder_params + a_common + [str(output_path)]
+            elif seg.sync_mode == "rubberband":
+                tempo = max(1.0, min(2.0, seg.speed_applied or (1.0 / ratio)))
+                if has_orig_audio:
+                    filter_complex = (
+                        f"[0:a]volume={self.orig_volume:.4f},aresample=48000:async=1[bga]; "
+                        f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1[duba]; "
+                        f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+                    )
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", str(seg.start_sec),
+                        "-t", str(seg.duration_sec),
+                        "-i", str(video_path),
+                        "-i", str(audio_p),
+                        "-filter_complex", filter_complex,
+                        "-map", "0:v:0",
+                        "-map", "[aout]",
+                    ] + v_common + a_common + [str(output_path)]
+                else:
+                    filter_complex = f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1,apad[aout]"
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", str(seg.start_sec),
+                        "-t", str(seg.duration_sec),
+                        "-i", str(video_path),
+                        "-i", str(audio_p),
+                        "-filter_complex", filter_complex,
+                        "-map", "0:v:0",
+                        "-map", "[aout]",
+                    ] + v_common + a_common + [str(output_path)]
 
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            else:
+                v_speed = seg.video_speed_applied or ratio
+                setpts_factor = 1.0 / max(0.1, v_speed)
+                bg_tempo = max(0.25, min(4.0, v_speed))
+                if has_orig_audio:
+                    filter_complex = (
+                        f"[0:v]setpts={setpts_factor:.4f}*PTS[vout]; "
+                        f"[0:a]volume={self.orig_volume:.4f},atempo={bg_tempo:.4f},aresample=48000:async=1[bga]; "
+                        f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1[duba]; "
+                        f"[bga][duba]amix=inputs=2:duration=longest:dropout_transition=0[aout]"
+                    )
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", str(seg.start_sec),
+                        "-t", str(seg.duration_sec),
+                        "-i", str(video_path),
+                        "-i", str(audio_p),
+                        "-filter_complex", filter_complex,
+                        "-map", "[vout]",
+                        "-map", "[aout]",
+                    ] + v_common + a_common + [str(output_path)]
+                else:
+                    filter_complex = (
+                        f"[0:v]setpts={setpts_factor:.4f}*PTS[vout]; "
+                        f"[1:a]volume={self.dub_volume:.4f},aresample=48000:async=1[aout]"
+                    )
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", str(seg.start_sec),
+                        "-t", str(seg.duration_sec),
+                        "-i", str(video_path),
+                        "-i", str(audio_p),
+                        "-filter_complex", filter_complex,
+                        "-map", "[vout]",
+                        "-map", "[aout]",
+                    ] + v_common + a_common + [str(output_path)]
+
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
         if res.returncode != 0:
-            raise RuntimeError(f"Failed retry with atempo on segment {seg.seg_id}: {res.stderr}")
+            err_msg = res.stderr.strip() if res.stderr else "Unknown FFmpeg error"
+            raise RuntimeError(f"Failed to encode segment {seg.seg_id}: {err_msg}")
