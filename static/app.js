@@ -34,7 +34,7 @@ const el = {
   voiceRateSelect: document.getElementById('voiceRateSelect'),
   btnPreviewVoice: document.getElementById('btnPreviewVoice'),
   minRatioInput: document.getElementById('minRatioInput'),
-  maxRatioInput: document.getElementById('maxRatioInput'),
+  ratioDescBadge: document.getElementById('ratioDescBadge'),
   origVolSlider: document.getElementById('origVolSlider'),
   origVolBadge: document.getElementById('origVolBadge'),
   dubVolSlider: document.getElementById('dubVolSlider'),
@@ -81,7 +81,15 @@ document.addEventListener('DOMContentLoaded', () => {
   loadSampleMockData();
   updateOrigVolUI();
   updateDubVolUI();
+  updateRatioUI();
 });
+
+function updateRatioUI() {
+  if (!el.minRatioInput || !el.ratioDescBadge) return;
+  const minR = parseFloat(el.minRatioInput.value) || 0.85;
+  const maxSpeed = (1.0 / Math.max(0.1, minR)).toFixed(2);
+  el.ratioDescBadge.textContent = `Tối đa ${maxSpeed}x (${minR.toFixed(2)})`;
+}
 
 function updateOrigVolUI() {
   if (!el.origVolSlider || !el.origVolBadge) return;
@@ -195,6 +203,13 @@ function setupEventListeners() {
     });
   });
 
+  if (el.minRatioInput) {
+    el.minRatioInput.addEventListener('input', () => {
+      updateRatioUI();
+      if (state.subtitles.length > 0) renderSubtitleList(state.subtitles);
+    });
+  }
+
   el.threadsSlider.addEventListener('input', () => {
     el.threadsValue.textContent = `${el.threadsSlider.value} luồng`;
   });
@@ -293,8 +308,10 @@ function renderSubtitleList(subs) {
 
 function getRatioClass(r) {
   if (!r) return 'ok';
-  if (r >= 0.90 && r <= 1.15) return 'ok';
-  if (r >= 0.75 && r <= 1.30) return 'warn';
+  if (r >= 1.0) return 'ok'; // Giọng AI ngắn hơn video -> Chuẩn 100% tự nhiên
+  const minR = el.minRatioInput ? parseFloat(el.minRatioInput.value) || 0.85 : 0.85;
+  if (r >= minR) return 'ok'; // Giọng AI dài hơn trong ngưỡng -> Tăng tốc vừa khung
+  if (r >= 0.70) return 'warn'; // Giọng AI dài hơn nhiều -> Làm chậm video
   return 'bad';
 }
 
@@ -405,8 +422,7 @@ async function startDubbingProcess() {
     srt_orig_path: state.srtOrigPath,
     voice: el.voiceSelect.value,
     voice_rate: el.voiceRateSelect.value,
-    min_ratio: parseFloat(el.minRatioInput.value) || 0.90,
-    max_ratio: parseFloat(el.maxRatioInput.value) || 1.15,
+    min_ratio: parseFloat(el.minRatioInput.value) || 0.85,
     orig_volume: origVolVal,
     dub_volume: dubVolVal,
     num_workers: parseInt(el.threadsSlider.value, 10) || 50,

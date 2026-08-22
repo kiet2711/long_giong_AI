@@ -212,8 +212,8 @@ class StartDubbingRequest(BaseModel):
     srt_orig_path: Optional[str] = None
     voice: Optional[str] = "BV421_vivn_streaming"
     voice_rate: Optional[str] = "1.0"
-    min_ratio: Optional[float] = 0.90
-    max_ratio: Optional[float] = 1.15
+    min_ratio: Optional[float] = 0.85
+    max_ratio: Optional[float] = 1.00
     orig_volume: Optional[float] = 0.15
     dub_volume: Optional[float] = 1.20
     num_workers: Optional[int] = 50
@@ -252,8 +252,8 @@ async def start_dubbing(req: StartDubbingRequest):
         try:
             engine = FFmpegDubbingEngine(
                 tts_client=tts_client,
-                min_ratio=req.min_ratio if req.min_ratio is not None else 0.90,
-                max_ratio=req.max_ratio if req.max_ratio is not None else 1.15,
+                min_ratio=req.min_ratio if req.min_ratio is not None else 0.85,
+                max_ratio=req.max_ratio if req.max_ratio is not None else 1.00,
                 orig_volume=req.orig_volume if req.orig_volume is not None else 0.15,
                 dub_volume=req.dub_volume if req.dub_volume is not None else 1.20,
                 num_workers=req.num_workers if req.num_workers is not None else 50,

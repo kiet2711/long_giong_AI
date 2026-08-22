@@ -188,8 +188,13 @@ class FFmpegDubbingEngine:
             ratio = seg.duration_sec / max(0.01, aud_dur)
             seg.ratio = round(ratio, 3)
 
-            # Assign Sync Mode (04a: rubberband vs 04b: setpts)
-            if self.min_ratio <= ratio <= self.max_ratio:
+            # Assign Sync Mode:
+            # - ratio >= 1.0: AI voice is shorter/equal -> Keep 100% pristine voice 1.0x (never slow down) & video 1.0x
+            # - min_ratio <= ratio < 1.0: AI voice is slightly longer -> Speed up voice only (tempo > 1.0)
+            # - ratio < min_ratio: AI voice is much longer -> Slow down video (setpts), keep pristine voice 1.0x
+            if ratio >= 1.0:
+                seg.sync_mode = "passthrough"
+            elif ratio >= self.min_ratio:
                 seg.sync_mode = "rubberband"
             else:
                 seg.sync_mode = "setpts"
@@ -345,14 +350,44 @@ class FFmpegDubbingEngine:
                 raise RuntimeError(f"Failed to encode GAP segment {seg.seg_id}: {res.stderr}")
 
         elif seg.seg_type == "dub":
-            # Dub Segment: Apply 04a (rubberband) or 04b (setpts)
+            # Dub Segment: Apply passthrough (ratio >= 1.0), rubberband (min_ratio <= ratio < 1.0), or setpts (ratio < min_ratio)
             audio_p = Path(seg.audio_path)
             ratio = seg.ratio or 1.0
 
-            if seg.sync_mode == "rubberband":
-                # 04a: Keep video 1.0x, stretch audio
-                # audio stretch tempo = 1 / ratio
-                tempo = max(0.5, min(2.0, 1.0 / ratio))
+            if seg.sync_mode == "passthrough":
+                # Ratio >= 1.0: AI voice finishes within video segment -> Pristine 1.0x voice, 1.0x video (never slow down voice)
+                if has_orig_audio:
+                    filter_complex = (
+                        f"[0:a]volume={self.orig_volume:.4f}[bga]; "
+                        f"[1:a]volume={self.dub_volume:.4f}[duba]; "
+                        f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
+                    )
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", str(seg.start_sec),
+                        "-t", str(seg.duration_sec),
+                        "-i", str(video_path),
+                        "-i", str(audio_p),
+                        "-filter_complex", filter_complex,
+                        "-map", "0:v:0",
+                        "-map", "[aout]",
+                    ] + v_common + a_common + [str(output_path)]
+                else:
+                    filter_complex = f"[1:a]volume={self.dub_volume:.4f},apad[aout]"
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", str(seg.start_sec),
+                        "-t", str(seg.duration_sec),
+                        "-i", str(video_path),
+                        "-i", str(audio_p),
+                        "-filter_complex", filter_complex,
+                        "-map", "0:v:0",
+                        "-map", "[aout]",
+                    ] + v_common + a_common + [str(output_path)]
+
+            elif seg.sync_mode == "rubberband":
+                # min_ratio <= ratio < 1.0: AI voice is slightly longer -> Speed up AI voice only (tempo > 1.0), keep video 1.0x
+                tempo = max(1.0, min(2.0, 1.0 / ratio))
 
                 if has_orig_audio:
                     filter_complex = (
@@ -371,7 +406,7 @@ class FFmpegDubbingEngine:
                         "-map", "[aout]",
                     ] + v_common + a_common + [str(output_path)]
                 else:
-                    filter_complex = f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f}[aout]"
+                    filter_complex = f"[1:a]rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f},apad[aout]"
                     cmd = [
                         "ffmpeg", "-y",
                         "-ss", str(seg.start_sec),
@@ -384,12 +419,10 @@ class FFmpegDubbingEngine:
                     ] + v_common + a_common + [str(output_path)]
 
             else:
-                # 04b: Change video speed using setpts, keep pristine AI voice 1.0x
-                # setpts factor = 1 / ratio (makes video longer or shorter to match audio)
+                # ratio < min_ratio: AI voice is much longer -> Slow down video (setpts), keep pristine AI voice 1.0x
                 setpts_factor = 1.0 / ratio
 
                 if has_orig_audio:
-                    # stretch background audio to match video duration
                     bg_tempo = max(0.5, min(2.0, ratio))
                     filter_complex = (
                         f"[0:v]setpts={setpts_factor:.4f}*PTS[vout]; "
@@ -442,7 +475,7 @@ class FFmpegDubbingEngine:
         """Fallback filter using built-in atempo if rubberband has library issues."""
         has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
         ratio = seg.ratio or 1.0
-        tempo = max(0.5, min(2.0, 1.0 / ratio))
+        tempo = max(1.0, min(2.0, 1.0 / ratio)) if seg.sync_mode == "rubberband" else 1.0
         audio_p = Path(seg.audio_path)
 
         v_common = [
@@ -460,7 +493,7 @@ class FFmpegDubbingEngine:
                 f"[bga][duba]amix=inputs=2:duration=first:dropout_transition=0[aout]"
             )
         else:
-            filter_complex = f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f}[aout]"
+            filter_complex = f"[1:a]atempo={tempo:.4f},volume={self.dub_volume:.4f},apad[aout]"
 
         cmd = [
             "ffmpeg", "-y",

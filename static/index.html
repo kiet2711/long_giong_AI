@@ -41,16 +41,21 @@
         <div class="d">Ratio = duration_gốc / duration_lồng_tiếng</div>
       </div>
       <div class="arrow">→</div>
-      <div class="branch-group">
+      <div class="branch-group" style="min-width: 220px;">
         <div class="fstep branch">
-          <div class="n">04a · Lệch ít</div>
-          <div class="t">Giữ nguyên Video</div>
-          <div class="d">Stretch Audio bằng rubberband</div>
+          <div class="n">04a · Ratio ≥ 1.0</div>
+          <div class="t">Giọng chuẩn 100%</div>
+          <div class="d">Không giảm tốc giọng, video giữ 1.0x</div>
         </div>
         <div class="fstep branch">
-          <div class="n">04b · Lệch nhiều</div>
-          <div class="t">Đổi Speed Video</div>
-          <div class="d">setpts theo giọng AI sạch 100%</div>
+          <div class="n">04b · Lệch ít (Ratio &lt; 1.0)</div>
+          <div class="t">Tăng tốc giọng AI</div>
+          <div class="d">rubberband tăng tốc vừa khung video</div>
+        </div>
+        <div class="fstep branch">
+          <div class="n">04c · Lệch nhiều</div>
+          <div class="t">Giãn tốc độ Video</div>
+          <div class="d">setpts video khớp giọng đọc 1.0x</div>
         </div>
       </div>
       <div class="arrow">→</div>
@@ -181,15 +186,15 @@
           </div>
         </div>
 
-        <!-- Row: Min / Max Ratio -->
-        <div class="row-inputs form-group" style="margin-top: 8px;">
-          <div>
-            <label>Min Ratio (Stretch)</label>
-            <input type="number" id="minRatioInput" step="0.05" value="0.90" min="0.5" max="1.0">
+        <!-- Sync Ratio Setting -->
+        <div class="form-group" style="margin-top: 8px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <label style="margin-bottom: 0;">Ngưỡng tăng tốc giọng AI (Min Ratio)</label>
+            <span id="ratioDescBadge" class="slider-badge badge-amber">Tối đa 1.18x (0.85)</span>
           </div>
-          <div>
-            <label>Max Ratio (Stretch)</label>
-            <input type="number" id="maxRatioInput" step="0.05" value="1.15" min="1.0" max="2.0">
+          <input type="number" id="minRatioInput" step="0.05" value="0.85" min="0.5" max="1.0">
+          <div style="font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.35;">
+            * Giọng đọc ngắn hơn cảnh video luôn giữ nguyên 100% tự nhiên (không giảm tốc). Nếu giọng đọc dài hơn video sẽ tăng tốc (tối đa tới ngưỡng này), nếu dài hơn nữa sẽ làm chậm video.
           </div>
         </div>
 
