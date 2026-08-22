@@ -342,6 +342,27 @@
       
       <div class="log-box" id="logBox"></div>
 
+      <!-- FAILED SENTENCES REVIEW & RETRY CONTAINER -->
+      <div class="failed-review-container" id="failedReviewContainer" style="display: none;">
+        <div class="failed-review-header">
+          <div class="failed-badge-tag">⚠️ Cần xử lý <span id="failedCountBadge">0</span> câu bị lỗi</div>
+          <div class="failed-review-desc">Các câu dưới đây bị CapCut từ chối (do từ nhạy cảm hoặc nghẽn mạng). Bạn có thể sửa trực tiếp câu từ và bấm tạo lại.</div>
+        </div>
+        
+        <div class="failed-list" id="failedList"></div>
+        
+        <div class="failed-actions-bar">
+          <button class="btn btn-teal btn-sm" id="btnRetryAllFailed">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+            Thử tạo lại tất cả câu lỗi
+          </button>
+          <button class="btn btn-outline btn-sm" id="btnSkipFailedAndRender">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19"></line></svg>
+            Bỏ qua & Tiếp tục Render Video
+          </button>
+        </div>
+      </div>
+
       <div class="modal-actions">
         <button class="btn btn-teal" id="btnDownloadResult" style="display: none;">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>

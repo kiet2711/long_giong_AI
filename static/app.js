@@ -85,6 +85,13 @@ const el = {
   floatingJobTitle: document.getElementById('floatingJobTitle'),
   floatingJobPct: document.getElementById('floatingJobPct'),
   btnOpenModalFromFloating: document.getElementById('btnOpenModalFromFloating'),
+
+  // Failed Review UI
+  failedReviewContainer: document.getElementById('failedReviewContainer'),
+  failedCountBadge: document.getElementById('failedCountBadge'),
+  failedList: document.getElementById('failedList'),
+  btnRetryAllFailed: document.getElementById('btnRetryAllFailed'),
+  btnSkipFailedAndRender: document.getElementById('btnSkipFailedAndRender'),
 };
 
 // --- Initialization ---
@@ -363,6 +370,14 @@ function setupEventListeners() {
       el.modalBackdrop.classList.add('show');
       el.floatingJobPill.style.display = 'none';
     });
+  }
+
+  // Failed Review actions
+  if (el.btnRetryAllFailed) {
+    el.btnRetryAllFailed.addEventListener('click', retryAllFailedSegments);
+  }
+  if (el.btnSkipFailedAndRender) {
+    el.btnSkipFailedAndRender.addEventListener('click', resumeDubbingRender);
   }
 }
 
@@ -675,11 +690,20 @@ function connectWebSocket(jobId) {
         }
       }
 
+      // Needs Review Stage (Failed TTS segments)
+      if (msg.stage === 'tts_needs_review') {
+        el.modalTitle.textContent = '⚠️ Cần xem xét câu lỗi CapCut';
+        el.btnStartDubbing.disabled = false;
+        const failed = msg.data?.failed_segments || msg.failed_segments || [];
+        renderFailedSegmentsReview(failed);
+      }
+
       // Completed
       if (msg.stage === 'completed') {
         el.modalTitle.textContent = '🎉 Hoàn tất Lồng tiếng & Render!';
         el.progressBarFill.style.width = '100%';
         el.btnStartDubbing.disabled = false;
+        if (el.failedReviewContainer) el.failedReviewContainer.style.display = 'none';
 
         if (el.floatingJobPill) el.floatingJobPill.classList.add('completed');
         if (el.floatingSpinner) {
@@ -722,6 +746,156 @@ function connectWebSocket(jobId) {
   ws.onerror = (e) => {
     console.error('WS Error:', e);
   };
+}
+
+// --- Render Failed Sentences Review Box ---
+function renderFailedSegmentsReview(failedSegments) {
+  if (!el.failedReviewContainer || !el.failedList) return;
+  el.failedList.innerHTML = '';
+  el.failedCountBadge.textContent = failedSegments.length;
+  el.failedReviewContainer.style.display = 'block';
+
+  failedSegments.forEach((seg) => {
+    const itemDiv = document.createElement('div');
+    itemDiv.className = 'failed-item';
+    itemDiv.id = `failed-item-${seg.seg_id}`;
+
+    itemDiv.innerHTML = `
+      <div class="failed-item-idx">#${String(seg.seg_id).padStart(2, '0')}</div>
+      <input type="text" class="failed-item-input" id="failed-input-${seg.seg_id}" value="${escapeHtml(seg.text_dub)}" placeholder="Nội dung câu..." />
+      <button class="failed-item-btn" id="btn-retry-${seg.seg_id}">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+        Thử lại
+      </button>
+    `;
+
+    const retryBtn = itemDiv.querySelector(`#btn-retry-${seg.seg_id}`);
+    const inputEl = itemDiv.querySelector(`#failed-input-${seg.seg_id}`);
+
+    retryBtn.addEventListener('click', async () => {
+      retryBtn.disabled = true;
+      retryBtn.innerHTML = 'Đang thử...';
+      try {
+        const res = await fetch('/api/retry_tts_segments', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            job_id: state.currentJobId,
+            segments: [{ seg_id: seg.seg_id, text_dub: inputEl.value }],
+            voice: el.voiceSelect.value,
+            voice_rate: el.voiceRateSelect.value,
+          }),
+        });
+        const data = await res.json();
+        const updatedSeg = (data.updated_segments || [])[0];
+        if (updatedSeg && !updatedSeg.is_failed) {
+          itemDiv.classList.add('success');
+          retryBtn.className = 'failed-item-btn btn-done';
+          retryBtn.innerHTML = '✅ Đã tạo';
+          retryBtn.disabled = true;
+          inputEl.disabled = true;
+          if (data.remaining_failed === 0) {
+            appendLog('[HỆ THỐNG] Đã tạo thành công tất cả câu lỗi! Tự động tiếp tục Render Video...');
+            setTimeout(resumeDubbingRender, 1000);
+          }
+        } else {
+          retryBtn.disabled = false;
+          retryBtn.innerHTML = '❌ Thử lại';
+          appendLog(`[TTS LỖI] Câu #${seg.seg_id}: ${updatedSeg?.tts_error || 'Thất bại'}`);
+        }
+      } catch (err) {
+        retryBtn.disabled = false;
+        retryBtn.innerHTML = '❌ Thử lại';
+        appendLog(`[LỖI] ${err.message}`);
+      }
+    });
+
+    el.failedList.appendChild(itemDiv);
+  });
+}
+
+async function retryAllFailedSegments() {
+  if (!el.failedList || !state.currentJobId) return;
+  const items = el.failedList.querySelectorAll('.failed-item:not(.success)');
+  if (items.length === 0) {
+    resumeDubbingRender();
+    return;
+  }
+
+  el.btnRetryAllFailed.disabled = true;
+  el.btnRetryAllFailed.textContent = 'Đang thử lại tất cả...';
+
+  const segmentsToRetry = [];
+  items.forEach((item) => {
+    const segId = parseInt(item.id.replace('failed-item-', ''), 10);
+    const inputEl = item.querySelector('.failed-item-input');
+    segmentsToRetry.push({ seg_id: segId, text_dub: inputEl ? inputEl.value : '' });
+  });
+
+  try {
+    const res = await fetch('/api/retry_tts_segments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        job_id: state.currentJobId,
+        segments: segmentsToRetry,
+        voice: el.voiceSelect.value,
+        voice_rate: el.voiceRateSelect.value,
+      }),
+    });
+    const data = await res.json();
+    (data.updated_segments || []).forEach((updatedSeg) => {
+      const itemDiv = document.getElementById(`failed-item-${updatedSeg.seg_id}`);
+      if (itemDiv) {
+        const retryBtn = itemDiv.querySelector('.failed-item-btn');
+        const inputEl = itemDiv.querySelector('.failed-item-input');
+        if (!updatedSeg.is_failed) {
+          itemDiv.classList.add('success');
+          if (retryBtn) {
+            retryBtn.className = 'failed-item-btn btn-done';
+            retryBtn.innerHTML = '✅ Đã tạo';
+            retryBtn.disabled = true;
+          }
+          if (inputEl) inputEl.disabled = true;
+        }
+      }
+    });
+
+    if (data.remaining_failed === 0) {
+      appendLog('[HỆ THỐNG] Tất cả câu lỗi đã tạo thành công! Bắt đầu Render Video...');
+      setTimeout(resumeDubbingRender, 1000);
+    } else {
+      appendLog(`[HỆ THỐNG] Còn ${data.remaining_failed} câu chưa tạo được.`);
+    }
+  } catch (err) {
+    appendLog(`[LỖI] ${err.message}`);
+  } finally {
+    el.btnRetryAllFailed.disabled = false;
+    el.btnRetryAllFailed.innerHTML = `
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+      Thử tạo lại tất cả câu lỗi
+    `;
+  }
+}
+
+async function resumeDubbingRender() {
+  if (!state.currentJobId) return;
+  if (el.failedReviewContainer) el.failedReviewContainer.style.display = 'none';
+  el.statusMsg.textContent = 'Đang tiếp tục hòa trộn âm thanh & Render Video...';
+
+  try {
+    const res = await fetch('/api/resume_dubbing_render', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: state.currentJobId, skip_failed: true }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Không thể tiếp tục render');
+    appendLog('[HỆ THỐNG] Đã kích hoạt giai đoạn Render Video.');
+  } catch (err) {
+    appendLog(`[LỖI] ${err.message}`);
+    el.statusMsg.textContent = `Lỗi render: ${err.message}`;
+  }
 }
 
 // --- Convert Final Timeline to Subtitles List with Synchronized Timecodes ---

@@ -95,6 +95,8 @@ class TimelineSegment:
     video_speed_applied: Optional[float] = 1.0
     sync_desc: Optional[str] = ""
     output_segment_path: Optional[str] = None
+    tts_error: Optional[str] = None
+    is_failed: Optional[bool] = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

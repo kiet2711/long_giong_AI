@@ -201,7 +201,7 @@ class FFmpegDubbingEngine:
         total_segs = len(timeline_segs)
 
         # ---------------------------------------------------------------------
-        # Step 2: Generate TTS Audio for all dubbed subtitles
+        # Step 2: Generate TTS Audio for all dubbed subtitles (with Cache & Error Gathering)
         # ---------------------------------------------------------------------
         report(10.0, "tts", f"Bắt đầu tạo {total_dubs} câu giọng đọc AI qua CapCut TTS...")
         completed_tts = 0
@@ -209,82 +209,41 @@ class FFmpegDubbingEngine:
         def task_gen_tts(seg: TimelineSegment):
             nonlocal completed_tts
             audio_file = audio_dir / f"audio_seg_{seg.seg_id:04d}.mp3"
-            # Call TTS client
-            self.tts_client.generate_speech_to_file(
-                text=seg.text_dub,
-                output_file=audio_file,
-                voice=voice,
-                rate=voice_rate,
-            )
-            aud_dur = get_audio_duration(audio_file)
-            seg.audio_path = str(audio_file)
-            seg.audio_duration_sec = round(aud_dur, 3)
-            seg.ratio = round(seg.duration_sec / max(0.01, aud_dur), 2)
 
-            # Assign Sync Mode based on Audio & Video Speed limits:
-            if abs(aud_dur - seg.duration_sec) < 0.05:
-                # Perfectly matched
+            try:
+                # Reuse valid cached audio if available
+                if not (audio_file.exists() and audio_file.stat().st_size > 500):
+                    self.tts_client.generate_speech_to_file(
+                        text=seg.text_dub,
+                        output_file=audio_file,
+                        voice=voice,
+                        rate=voice_rate,
+                    )
+
+                aud_dur = get_audio_duration(audio_file)
+                seg.audio_path = str(audio_file)
+                seg.audio_duration_sec = round(aud_dur, 3)
+                seg.ratio = round(seg.duration_sec / max(0.01, aud_dur), 2)
+                seg.tts_error = None
+                seg.is_failed = False
+
+                self._calculate_sync_parameters(seg, aud_dur)
+
+            except Exception as exc:
+                seg.tts_error = str(exc)
+                seg.is_failed = True
+                seg.audio_path = None
+                seg.audio_duration_sec = None
                 seg.sync_mode = "passthrough"
-                seg.speed_applied = 1.0
-                seg.video_speed_applied = 1.0
-                seg.sync_desc = "Chuẩn 1.0x (Khớp)"
-
-            elif aud_dur < seg.duration_sec:
-                # 1. AI Voice is SHORTER than video segment (can slow down voice or speed up video)
-                req_audio_speed = round(aud_dur / max(0.01, seg.duration_sec), 2)
-
-                if req_audio_speed >= self.min_audio_speed and self.min_audio_speed < 0.999:
-                    # Slow down AI voice to fill video segment duration
-                    seg.sync_mode = "rubberband"
-                    seg.speed_applied = req_audio_speed
-                    seg.video_speed_applied = 1.0
-                    seg.sync_desc = f"Giảm giọng {req_audio_speed:.2f}x (Video 1.0x)"
-                else:
-                    # Exceeds allowed voice slowdown -> Speed up video
-                    req_v_speed = round(seg.duration_sec / max(0.01, aud_dur), 2)
-                    v_speed = min(self.max_video_speed, req_v_speed)
-                    if v_speed > 1.01:
-                        seg.sync_mode = "setpts"
-                        seg.speed_applied = 1.0
-                        seg.video_speed_applied = v_speed
-                        seg.sync_desc = f"Tăng video {v_speed:.2f}x (Giọng 1.0x)"
-                    else:
-                        seg.sync_mode = "passthrough"
-                        seg.speed_applied = 1.0
-                        seg.video_speed_applied = 1.0
-                        seg.sync_desc = "Chuẩn 1.0x (Khớp)"
-
-            else:
-                # 2. AI Voice is LONGER than video segment (can speed up voice or slow down video)
-                req_audio_speed = round(aud_dur / max(0.01, seg.duration_sec), 2)
-
-                if req_audio_speed <= self.max_audio_speed and self.max_audio_speed > 1.001:
-                    # Speed up AI voice
-                    seg.sync_mode = "rubberband"
-                    seg.speed_applied = req_audio_speed
-                    seg.video_speed_applied = 1.0
-                    seg.sync_desc = f"Tăng giọng {req_audio_speed:.2f}x (Video 1.0x)"
-                else:
-                    # Slow down video
-                    req_v_speed = round(seg.duration_sec / max(0.01, aud_dur), 2)
-                    v_speed = max(self.min_video_speed, req_v_speed)
-                    if v_speed < 0.99:
-                        seg.sync_mode = "setpts"
-                        seg.speed_applied = 1.0
-                        seg.video_speed_applied = v_speed
-                        seg.sync_desc = f"Chậm video {v_speed:.2f}x (Giọng 1.0x)"
-                    else:
-                        seg.sync_mode = "passthrough"
-                        seg.speed_applied = 1.0
-                        seg.video_speed_applied = 1.0
-                        seg.sync_desc = "Chuẩn 1.0x (Khớp)"
+                seg.sync_desc = f"Lỗi CapCut TTS: {exc}"
+                logger.warning(f"TTS segment #{seg.seg_id} failed: {exc}")
 
             completed_tts += 1
             pct = 10.0 + (completed_tts / max(1, total_dubs)) * 35.0
             report(
                 pct,
                 "tts",
-                f"Đã tạo {completed_tts}/{total_dubs} audio: \"{seg.text_dub[:25]}...\" ({seg.sync_desc})",
+                f"Đã xử lý {completed_tts}/{total_dubs} audio: \"{seg.text_dub[:25]}...\" ({seg.sync_desc})",
                 {
                     "seg_id": seg.seg_id,
                     "ratio": seg.ratio,
@@ -292,6 +251,8 @@ class FFmpegDubbingEngine:
                     "speed_applied": seg.speed_applied,
                     "video_speed_applied": seg.video_speed_applied,
                     "sync_desc": seg.sync_desc,
+                    "is_failed": seg.is_failed,
+                    "tts_error": seg.tts_error,
                 },
             )
             return seg
@@ -303,6 +264,139 @@ class FFmpegDubbingEngine:
 
         # Sort timeline segments by seg_id
         timeline_segs.sort(key=lambda s: s.seg_id)
+
+        # Check for failed TTS segments
+        failed_segs = [s for s in timeline_segs if s.seg_type == "dub" and (s.is_failed or not s.audio_path)]
+        if failed_segs and not kwargs.get("skip_failed_auto", False):
+            report(45.0, "tts_needs_review", f"Có {len(failed_segs)} câu bị lỗi CapCut cần xử lý.", {
+                "failed_segments": [s.to_dict() for s in failed_segs],
+                "timeline": [s.to_dict() for s in timeline_segs],
+            })
+            return {
+                "status": "needs_review",
+                "stage": "tts_needs_review",
+                "message": f"Có {len(failed_segs)} câu bị lỗi CapCut cần xử lý.",
+                "failed_segments": [s.to_dict() for s in failed_segs],
+                "timeline": [s.to_dict() for s in timeline_segs],
+            }
+
+        return self.render_remaining_pipeline(
+            video_p=video_p,
+            timeline_segs=timeline_segs,
+            output_video_path=output_video_path,
+            work_p=work_p,
+            video_meta=video_meta,
+            progress_cb=progress_cb,
+        )
+
+    def _calculate_sync_parameters(self, seg: TimelineSegment, aud_dur: float):
+        """Calculate sync mode and speeds for audio and video based on limits."""
+        if abs(aud_dur - seg.duration_sec) < 0.05:
+            seg.sync_mode = "passthrough"
+            seg.speed_applied = 1.0
+            seg.video_speed_applied = 1.0
+            seg.sync_desc = "Chuẩn 1.0x (Khớp)"
+
+        elif aud_dur < seg.duration_sec:
+            # AI Voice is SHORTER than video segment (can slow down voice or speed up video)
+            req_audio_speed = round(aud_dur / max(0.01, seg.duration_sec), 2)
+            if req_audio_speed >= self.min_audio_speed and self.min_audio_speed < 0.999:
+                seg.sync_mode = "rubberband"
+                seg.speed_applied = req_audio_speed
+                seg.video_speed_applied = 1.0
+                seg.sync_desc = f"Giảm giọng {req_audio_speed:.2f}x (Video 1.0x)"
+            else:
+                req_v_speed = round(seg.duration_sec / max(0.01, aud_dur), 2)
+                v_speed = min(self.max_video_speed, req_v_speed)
+                if v_speed > 1.01:
+                    seg.sync_mode = "setpts"
+                    seg.speed_applied = 1.0
+                    seg.video_speed_applied = v_speed
+                    seg.sync_desc = f"Tăng video {v_speed:.2f}x (Giọng 1.0x)"
+                else:
+                    seg.sync_mode = "passthrough"
+                    seg.speed_applied = 1.0
+                    seg.video_speed_applied = 1.0
+                    seg.sync_desc = "Chuẩn 1.0x (Khớp)"
+        else:
+            # AI Voice is LONGER than video segment (can speed up voice or slow down video)
+            req_audio_speed = round(aud_dur / max(0.01, seg.duration_sec), 2)
+            if req_audio_speed <= self.max_audio_speed and self.max_audio_speed > 1.001:
+                seg.sync_mode = "rubberband"
+                seg.speed_applied = req_audio_speed
+                seg.video_speed_applied = 1.0
+                seg.sync_desc = f"Tăng giọng {req_audio_speed:.2f}x (Video 1.0x)"
+            else:
+                req_v_speed = round(seg.duration_sec / max(0.01, aud_dur), 2)
+                v_speed = max(self.min_video_speed, req_v_speed)
+                if v_speed < 0.99:
+                    seg.sync_mode = "setpts"
+                    seg.speed_applied = 1.0
+                    seg.video_speed_applied = v_speed
+                    seg.sync_desc = f"Chậm video {v_speed:.2f}x (Giọng 1.0x)"
+                else:
+                    seg.sync_mode = "passthrough"
+                    seg.speed_applied = 1.0
+                    seg.video_speed_applied = 1.0
+                    seg.sync_desc = "Chuẩn 1.0x (Khớp)"
+
+    def retry_single_tts_segment(
+        self,
+        seg: TimelineSegment,
+        text_dub: str,
+        work_dir: Union[str, Path],
+        voice: Optional[str] = "BV421_vivn_streaming",
+        voice_rate: Optional[str] = "1.0",
+    ) -> TimelineSegment:
+        """Re-generate TTS audio for a specific segment with updated or original text."""
+        audio_dir = Path(work_dir) / "audios"
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        audio_file = audio_dir / f"audio_seg_{seg.seg_id:04d}.mp3"
+
+        seg.text_dub = text_dub.strip()
+        if audio_file.exists():
+            try: audio_file.unlink()
+            except Exception: pass
+
+        self.tts_client.generate_speech_to_file(
+            text=seg.text_dub,
+            output_file=audio_file,
+            voice=voice,
+            rate=voice_rate,
+        )
+        aud_dur = get_audio_duration(audio_file)
+        seg.audio_path = str(audio_file)
+        seg.audio_duration_sec = round(aud_dur, 3)
+        seg.ratio = round(seg.duration_sec / max(0.01, aud_dur), 2)
+        seg.tts_error = None
+        seg.is_failed = False
+        self._calculate_sync_parameters(seg, aud_dur)
+        return seg
+
+    def render_remaining_pipeline(
+        self,
+        video_p: Path,
+        timeline_segs: List[TimelineSegment],
+        output_video_path: Union[str, Path],
+        work_p: Path,
+        video_meta: VideoMetadata,
+        progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Step 3 (Audio Mix) and Step 4 (Video Render) of dubbing pipeline."""
+        out_p = Path(output_video_path)
+        seg_dir = work_p / "segments"
+        seg_dir.mkdir(parents=True, exist_ok=True)
+        total_segs = len(timeline_segs)
+        total_dubs = sum(1 for s in timeline_segs if s.seg_type == "dub")
+
+        def report(percent: float, stage: str, message: str, data: Optional[Dict[str, Any]] = None):
+            if progress_cb:
+                progress_cb({
+                    "percent": round(percent, 1),
+                    "stage": stage,
+                    "message": message,
+                    "data": data or {},
+                })
 
         # Check if video speed modification is needed
         has_video_speed_change = any(abs((s.video_speed_applied or 1.0) - 1.0) > 0.01 for s in timeline_segs)
@@ -365,7 +459,6 @@ class FFmpegDubbingEngine:
         # ---------------------------------------------------------------------
         if not has_video_speed_change:
             # === SUPER FAST LOSSLESS MODE (-c:v copy) ===
-            # Video frames are 100% untouched. Direct stream copy in ~0.5 second!
             report(85.0, "video_render", "Kích hoạt Siêu Tốc (Lossless Stream Copy - 0s video encode)...")
             final_mux_cmd = [
                 "ffmpeg", "-y",
@@ -385,7 +478,6 @@ class FFmpegDubbingEngine:
 
         else:
             # === SINGLE-PASS FILTERGRAPH PIPELINE ===
-            # 1 single decode + 1 single filtergraph trim/setpts/concat + 1 single GPU NVENC encode pass!
             target_fps = 30.0 if video_meta.fps <= 0 else min(60.0, video_meta.fps)
             v_encoder_params = get_best_video_encoder_params(target_fps)
             enc_name = v_encoder_params[1]
@@ -423,7 +515,6 @@ class FFmpegDubbingEngine:
 
             res = subprocess.run(single_pass_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
             if res.returncode != 0:
-                # If GPU NVENC fails for any reason, fallback to CPU ultrafast single-pass
                 report(85.0, "video_render", "GPU bận, chuyển sang chế độ CPU Ultrafast Single-Pass...")
                 cpu_v_params = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-pix_fmt", "yuv420p", "-r", str(target_fps)]
                 cpu_cmd = [
@@ -459,6 +550,7 @@ class FFmpegDubbingEngine:
         })
 
         return {
+            "status": "completed",
             "output_path": str(out_p),
             "output_srt_path": str(out_srt_p) if out_srt_p.exists() else None,
             "total_segments": total_segs,
@@ -511,6 +603,29 @@ class FFmpegDubbingEngine:
                 raise RuntimeError(f"Failed to render audio GAP segment {seg.seg_id}: {res.stderr.strip() or 'Unknown error'}")
 
         elif seg.seg_type == "dub":
+            if seg.is_failed or not seg.audio_path or not Path(seg.audio_path).exists():
+                # Fallback: keep original background audio / silence if AI audio was skipped
+                if has_orig_audio:
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", str(seg.start_sec),
+                        "-t", str(seg.duration_sec),
+                        "-i", str(video_path),
+                        "-vn",
+                        "-af", f"volume={self.orig_volume:.4f},aresample=48000,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}",
+                    ] + a_common + [str(output_path)]
+                else:
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-f", "lavfi", "-t", str(seg.duration_sec), "-i", "anullsrc=r=48000:cl=stereo",
+                        "-af", f"aresample=48000,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}",
+                    ] + a_common + [str(output_path)]
+
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+                if res.returncode != 0:
+                    raise RuntimeError(f"Failed to render fallback audio for segment {seg.seg_id}")
+                return
+
             audio_p = Path(seg.audio_path)
 
             if seg.sync_mode == "passthrough":

@@ -296,18 +296,23 @@ async def start_dubbing(req: StartDubbingRequest):
                 progress_cb=on_progress,
             )
 
+            with job_locks:
+                jobs_state[job_id]["engine"] = engine
+                jobs_state[job_id]["req"] = req
+                jobs_state[job_id]["work_dir"] = str(work_dir)
+                jobs_state[job_id]["out_video_path"] = str(out_video_path)
+                jobs_state[job_id]["timeline"] = result.get("timeline", [])
+
+            # If failed TTS segments require user review, pause here
+            if result.get("status") == "needs_review":
+                with job_locks:
+                    jobs_state[job_id]["status"] = "needs_review"
+                    jobs_state[job_id]["stage"] = "tts_needs_review"
+                    jobs_state[job_id]["failed_segments"] = result.get("failed_segments", [])
+                return
+
             out_srt_path = OUTPUTS_DIR / f"dubbed_{job_id}.srt"
-            srt_url = None
-            try:
-                if "timeline" in result:
-                    timeline_objs = [
-                        TimelineSegment(**s) if isinstance(s, dict) else s
-                        for s in result["timeline"]
-                    ]
-                    SRTParser.export_synced_srt(timeline_objs, out_srt_path)
-                    srt_url = f"/temp/outputs/{out_srt_path.name}"
-            except Exception:
-                pass
+            srt_url = f"/temp/outputs/{out_srt_path.name}" if out_srt_path.exists() else None
 
             with job_locks:
                 jobs_state[job_id]["status"] = "completed"
@@ -365,6 +370,165 @@ async def start_dubbing(req: StartDubbingRequest):
     t.start()
 
     return {"job_id": job_id, "status": "started"}
+
+
+class RetrySegmentsRequest(BaseModel):
+    job_id: str
+    segments: List[Dict[str, Any]]
+    voice: Optional[str] = None
+    voice_rate: Optional[str] = None
+
+
+class ResumeRenderRequest(BaseModel):
+    job_id: str
+    skip_failed: bool = True
+
+
+@app.post("/api/retry_tts_segments")
+async def retry_tts_segments(req: RetrySegmentsRequest):
+    """Re-generate TTS for specific failed segments."""
+    with job_locks:
+        if req.job_id not in jobs_state:
+            raise HTTPException(status_code=404, detail="Job not found")
+        job = jobs_state[req.job_id]
+        engine: FFmpegDubbingEngine = job.get("engine")
+        work_dir = Path(job.get("work_dir")) if job.get("work_dir") else None
+        timeline_list = job.get("timeline", [])
+
+    if not engine or not work_dir:
+        raise HTTPException(status_code=400, detail="Job context expired or not initialized")
+
+    updated = []
+    for item in req.segments:
+        seg_id = item["seg_id"]
+        text_dub = item.get("text_dub", "").strip()
+        matching_seg = next((s for s in timeline_list if s.get("seg_id") == seg_id), None)
+        if not matching_seg:
+            continue
+
+        seg_obj = TimelineSegment(**matching_seg)
+        try:
+            res_seg = engine.retry_single_tts_segment(
+                seg=seg_obj,
+                text_dub=text_dub or seg_obj.text_dub,
+                work_dir=work_dir,
+                voice=req.voice or "BV421_vivn_streaming",
+                voice_rate=req.voice_rate or "1.0",
+            )
+            for i, s in enumerate(timeline_list):
+                if s.get("seg_id") == seg_id:
+                    timeline_list[i] = res_seg.to_dict()
+                    break
+            updated.append(res_seg.to_dict())
+        except Exception as e:
+            updated.append({
+                "seg_id": seg_id,
+                "is_failed": True,
+                "tts_error": str(e),
+                "text_dub": text_dub or seg_obj.text_dub,
+            })
+
+    with job_locks:
+        jobs_state[req.job_id]["timeline"] = timeline_list
+        jobs_state[req.job_id]["failed_segments"] = [
+            s for s in timeline_list if s.get("seg_type") == "dub" and (s.get("is_failed") or not s.get("audio_path"))
+        ]
+
+    return {
+        "status": "ok",
+        "updated_segments": updated,
+        "remaining_failed": len(jobs_state[req.job_id]["failed_segments"]),
+    }
+
+
+@app.post("/api/resume_dubbing_render")
+async def resume_dubbing_render(req: ResumeRenderRequest):
+    """Resume Step 3 (Audio Mix) and Step 4 (Video Render) after reviewing failed TTS."""
+    with job_locks:
+        if req.job_id not in jobs_state:
+            raise HTTPException(status_code=404, detail="Job not found")
+        job = jobs_state[req.job_id]
+        engine: FFmpegDubbingEngine = job.get("engine")
+        work_dir = Path(job.get("work_dir")) if job.get("work_dir") else None
+        out_video_path = Path(job.get("out_video_path")) if job.get("out_video_path") else None
+        video_p = Path(job.get("req").video_path) if job.get("req") else None
+        timeline_list = job.get("timeline", [])
+
+    if not engine or not work_dir or not out_video_path or not video_p:
+        raise HTTPException(status_code=400, detail="Job context missing or expired")
+
+    timeline_objs = [TimelineSegment(**s) for s in timeline_list]
+    video_meta = get_video_metadata(video_p)
+
+    def worker_resume():
+        loop = asyncio.new_event_loop()
+
+        def on_progress(payload: Dict[str, Any]):
+            with job_locks:
+                jobs_state[req.job_id]["percent"] = payload["percent"]
+                jobs_state[req.job_id]["stage"] = payload["stage"]
+                jobs_state[req.job_id]["message"] = payload["message"]
+                jobs_state[req.job_id]["data"] = payload.get("data", {})
+
+            async def send_ws():
+                await manager.broadcast(req.job_id, payload)
+
+            try:
+                loop.run_until_complete(send_ws())
+            except Exception:
+                pass
+
+        try:
+            result = engine.render_remaining_pipeline(
+                video_p=video_p,
+                timeline_segs=timeline_objs,
+                output_video_path=out_video_path,
+                work_p=work_dir,
+                video_meta=video_meta,
+                progress_cb=on_progress,
+            )
+
+            out_srt_path = OUTPUTS_DIR / f"dubbed_{req.job_id}.srt"
+            srt_url = f"/temp/outputs/{out_srt_path.name}" if out_srt_path.exists() else None
+
+            with job_locks:
+                jobs_state[req.job_id]["status"] = "completed"
+                jobs_state[req.job_id]["percent"] = 100.0
+                jobs_state[req.job_id]["stage"] = "completed"
+                jobs_state[req.job_id]["output_path"] = str(out_video_path)
+                jobs_state[req.job_id]["output_url"] = f"/temp/outputs/{out_video_path.name}"
+                jobs_state[req.job_id]["output_srt_url"] = srt_url
+                jobs_state[req.job_id]["result"] = result
+
+            async def final_broadcast():
+                await manager.broadcast(
+                    req.job_id,
+                    {
+                        "percent": 100.0,
+                        "stage": "completed",
+                        "message": "Hoàn tất! Video & Phụ đề SRT đã sẵn sàng tải về.",
+                        "output_url": f"/temp/outputs/{out_video_path.name}",
+                        "output_srt_url": srt_url,
+                        "result": result,
+                    },
+                )
+
+            try:
+                loop.run_until_complete(final_broadcast())
+                loop.close()
+            except Exception:
+                pass
+
+        except Exception as e:
+            with job_locks:
+                jobs_state[req.job_id]["status"] = "failed"
+                jobs_state[req.job_id]["error"] = str(e)
+                jobs_state[req.job_id]["message"] = f"Lỗi render: {e}"
+
+    t = threading.Thread(target=worker_resume, daemon=True)
+    t.start()
+
+    return {"job_id": req.job_id, "status": "resumed"}
 
 
 @app.get("/api/job_status/{job_id}")
