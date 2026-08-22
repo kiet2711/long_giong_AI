@@ -240,53 +240,6 @@
     <div class="sub">Băm video theo SRT → khớp tốc độ audio/video → ghép lại không cần render toàn bộ</div>
   </header>
 
-  <section>
-    <h2>Sơ đồ luồng xử lý</h2>
-    <div class="flow">
-      <div class="fstep">
-        <div class="n">01</div>
-        <div class="t">Parse SRT gốc + SRT lồng tiếng</div>
-        <div class="d">Lấy timestamp, tính duration từng dòng</div>
-      </div>
-      <div class="arrow">→</div>
-      <div class="fstep">
-        <div class="n">02</div>
-        <div class="t">Cắt segment (-ss trước -i)</div>
-        <div class="d">Seek nhanh, không decode toàn bộ file</div>
-      </div>
-      <div class="arrow">→</div>
-      <div class="fstep">
-        <div class="n">03</div>
-        <div class="t">Tính ratio lệch</div>
-        <div class="d">duration_goc / duration_long_tieng</div>
-      </div>
-      <div class="arrow">→</div>
-      <div class="branch-group">
-        <div class="fstep branch">
-          <div class="n">04a · lệch ít</div>
-          <div class="t">Giữ nguyên video</div>
-          <div class="d">Stretch audio bằng rubberband</div>
-        </div>
-        <div class="fstep branch">
-          <div class="n">04b · lệch nhiều</div>
-          <div class="t">Đổi speed video</div>
-          <div class="d">setpts theo audio gốc, giữ giọng sạch</div>
-        </div>
-      </div>
-      <div class="arrow">→</div>
-      <div class="fstep">
-        <div class="n">05</div>
-        <div class="t">Encode song song</div>
-        <div class="d">Nhiều process ffmpeg cùng lúc, preset nhanh</div>
-      </div>
-      <div class="arrow">→</div>
-      <div class="fstep">
-        <div class="n">06</div>
-        <div class="t">Concat demuxer</div>
-        <div class="d">Ghép -c copy, gần như tức thì</div>
-      </div>
-    </div>
-  </section>
 
   <section>
     <h2>Giao diện xem trước</h2>

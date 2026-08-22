@@ -28,59 +28,6 @@
     </div>
   </header>
 
-  <!-- PIPELINE FLOW DIAGRAM -->
-  <section>
-    <h2>Sơ đồ luồng xử lý tự động</h2>
-    <div class="flow">
-      <div class="fstep">
-        <div class="n">01</div>
-        <div class="t">Parse SRT & Video</div>
-        <div class="d">Lấy timestamp, duration từng dòng & khoảng lặng</div>
-      </div>
-      <div class="arrow">→</div>
-      <div class="fstep">
-        <div class="n">02</div>
-        <div class="t">Sinh Audio TTS AI</div>
-        <div class="d">CapCut Engine (Tự xoay Device ID chống ban)</div>
-      </div>
-      <div class="arrow">→</div>
-      <div class="fstep">
-        <div class="n">03</div>
-        <div class="t">Tính Ratio Lệch</div>
-        <div class="d">Ratio = duration_gốc / duration_lồng_tiếng</div>
-      </div>
-      <div class="arrow">→</div>
-      <div class="branch-group" style="min-width: 220px;">
-        <div class="fstep branch">
-          <div class="n">04a · Ratio ≥ 1.0</div>
-          <div class="t">Giọng chuẩn 100%</div>
-          <div class="d">Không giảm tốc giọng, video giữ 1.0x</div>
-        </div>
-        <div class="fstep branch">
-          <div class="n">04b · Lệch ít (Ratio &lt; 1.0)</div>
-          <div class="t">Tăng tốc giọng AI</div>
-          <div class="d">rubberband tăng tốc vừa khung video</div>
-        </div>
-        <div class="fstep branch">
-          <div class="n">04c · Lệch nhiều</div>
-          <div class="t">Giãn tốc độ Video</div>
-          <div class="d">setpts video khớp giọng đọc 1.0x</div>
-        </div>
-      </div>
-      <div class="arrow">→</div>
-      <div class="fstep">
-        <div class="n">05</div>
-        <div class="t">Encode Song song</div>
-        <div class="d">Đa luồng FFmpeg siêu tốc (libx264 veryfast)</div>
-      </div>
-      <div class="arrow">→</div>
-      <div class="fstep">
-        <div class="n">06</div>
-        <div class="t">Concat Demuxer</div>
-        <div class="d">Ghép -c copy hoàn tất chỉ trong vài giây</div>
-      </div>
-    </div>
-  </section>
 
   <!-- CONTROLS GRID -->
   <section>
