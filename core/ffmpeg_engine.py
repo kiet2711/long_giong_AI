@@ -124,7 +124,7 @@ def create_silence_wav(output_path: Union[str, Path], duration_sec: float, sampl
 def coalesce_timeline_slices(timeline_segs: List[TimelineSegment]) -> List[VideoSlice]:
     """
     Merge consecutive timeline segments that share identical video speed into contiguous video slices.
-    Reduces thousands of individual subtitle cuts into just ~20-50 continuous video slices!
+    Reduces thousands of individual subtitle cuts into just ~1-10 continuous video slices!
     """
     if not timeline_segs:
         return []
@@ -136,9 +136,9 @@ def coalesce_timeline_slices(timeline_segs: List[TimelineSegment]) -> List[Video
 
     for seg in timeline_segs[1:]:
         seg_speed = round(seg.video_speed_applied or 1.0, 3)
-        # If speed is virtually identical and timeline is contiguous
-        if abs(seg_speed - current_speed) < 0.005 and abs(seg.start_sec - current_end) < 0.05:
-            current_end = seg.end_sec
+        # If speed is virtually identical, keep coalescing seamlessly across all gaps and dubs
+        if abs(seg_speed - current_speed) < 0.01:
+            current_end = max(current_end, seg.end_sec)
         else:
             slices.append(VideoSlice(
                 slice_id=len(slices),
@@ -377,47 +377,45 @@ class FFmpegDubbingEngine:
             seg.sync_desc = "Chuẩn 1.0x (Khớp)"
 
         elif aud_dur < seg.duration_sec:
-            # AI Voice is SHORTER than video segment (can slow down voice or speed up video)
+            # AI Voice is SHORTER than video segment (can slow down voice)
             req_audio_speed = round(aud_dur / max(0.01, seg.duration_sec), 2)
-            if req_audio_speed >= self.min_audio_speed and self.min_audio_speed < 0.999:
+            if self.min_audio_speed < 0.999:
+                applied_audio = max(self.min_audio_speed, req_audio_speed)
                 seg.sync_mode = "rubberband"
-                seg.speed_applied = req_audio_speed
+                seg.speed_applied = applied_audio
                 seg.video_speed_applied = 1.0
-                seg.sync_desc = f"Giảm giọng {req_audio_speed:.2f}x (Video 1.0x)"
+                seg.sync_desc = f"Giảm giọng {applied_audio:.2f}x (Video 1.0x)"
             else:
-                req_v_speed = round(seg.duration_sec / max(0.01, aud_dur), 2)
-                v_speed = min(self.max_video_speed, req_v_speed)
-                if v_speed > 1.01:
-                    seg.sync_mode = "setpts"
-                    seg.speed_applied = 1.0
-                    seg.video_speed_applied = v_speed
-                    seg.sync_desc = f"Tăng video {v_speed:.2f}x (Giọng 1.0x)"
-                else:
-                    seg.sync_mode = "passthrough"
-                    seg.speed_applied = 1.0
-                    seg.video_speed_applied = 1.0
-                    seg.sync_desc = "Chuẩn 1.0x (Khớp)"
+                seg.sync_mode = "passthrough"
+                seg.speed_applied = 1.0
+                seg.video_speed_applied = 1.0
+                seg.sync_desc = "Chuẩn 1.0x (Khớp)"
+
         else:
-            # AI Voice is LONGER than video segment (can speed up voice or slow down video)
+            # AI Voice is LONGER than video segment (speed up voice first)
             req_audio_speed = round(aud_dur / max(0.01, seg.duration_sec), 2)
-            if req_audio_speed <= self.max_audio_speed and self.max_audio_speed > 1.001:
+            applied_audio = min(self.max_audio_speed, req_audio_speed)
+
+            # If audio speed adjustment is sufficient (or video speed shouldn't change)
+            if applied_audio >= req_audio_speed - 0.05 or self.min_video_speed >= 0.999:
                 seg.sync_mode = "rubberband"
-                seg.speed_applied = req_audio_speed
+                seg.speed_applied = applied_audio
                 seg.video_speed_applied = 1.0
-                seg.sync_desc = f"Tăng giọng {req_audio_speed:.2f}x (Video 1.0x)"
+                seg.sync_desc = f"Tăng giọng {applied_audio:.2f}x (Video 1.0x)"
             else:
-                req_v_speed = round(seg.duration_sec / max(0.01, aud_dur), 2)
-                v_speed = max(self.min_video_speed, req_v_speed)
-                if v_speed < 0.99:
+                # Audio at max speed, video slows down for remaining difference
+                rem_ratio = req_audio_speed / max(0.01, applied_audio)
+                v_speed = max(self.min_video_speed, round(1.0 / max(0.01, rem_ratio), 2))
+                if abs(v_speed - 1.0) > 0.02:
                     seg.sync_mode = "setpts"
-                    seg.speed_applied = 1.0
+                    seg.speed_applied = applied_audio
                     seg.video_speed_applied = v_speed
-                    seg.sync_desc = f"Chậm video {v_speed:.2f}x (Giọng 1.0x)"
+                    seg.sync_desc = f"Tăng giọng {applied_audio:.2f}x & Chậm video {v_speed:.2f}x"
                 else:
-                    seg.sync_mode = "passthrough"
-                    seg.speed_applied = 1.0
+                    seg.sync_mode = "rubberband"
+                    seg.speed_applied = applied_audio
                     seg.video_speed_applied = 1.0
-                    seg.sync_desc = "Chuẩn 1.0x (Khớp)"
+                    seg.sync_desc = f"Tăng giọng {applied_audio:.2f}x (Video 1.0x)"
 
     def retry_single_tts_segment(
         self,
