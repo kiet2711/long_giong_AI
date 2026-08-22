@@ -257,7 +257,7 @@ class FFmpegDubbingEngine:
             )
             return seg
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(self.num_workers, 200))) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(self.num_workers, 50))) as executor:
             futures = [executor.submit(task_gen_tts, seg) for seg in dub_segs]
             for f in concurrent.futures.as_completed(futures):
                 f.result()

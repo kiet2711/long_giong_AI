@@ -232,10 +232,12 @@ class CapCutTTSClient:
     ) -> Dict[str, Any]:
         """Submit a new TTS task to CapCut."""
         url, headers, body_text = self.build_tts_request(texts, voice, resource_id, rate)
-        resp = self.session.post(url, headers=headers, data=body_text.encode("utf-8"), timeout=60)
-        data = resp.json()
+        resp = self.session.post(url, headers=headers, data=body_text.encode("utf-8"), timeout=15)
         if resp.status_code >= 400:
-            raise CapCutError(f"HTTP {resp.status_code}: {data}")
+            raise CapCutError(f"HTTP {resp.status_code}: {resp.text}")
+        data = resp.json()
+        if data.get("status_code", 0) not in (0, 200) and "status_code" in data:
+            raise CapCutError(f"API Error code {data.get('status_code')}: {data.get('message', '')}")
         return data
 
     def query_tts_task(self, task_id: str, token: str) -> Dict[str, Any]:
@@ -267,8 +269,13 @@ class CapCutTTSClient:
             headers["sign"] = make_sign_header(
                 url, self.device["appvr"], lower_headers["device-time"], self.device["tdid"]
             )
-        resp = self.session.post(url, headers=headers, data=body_text.encode("utf-8"), timeout=60)
-        return resp.json()
+        resp = self.session.post(url, headers=headers, data=body_text.encode("utf-8"), timeout=15)
+        if resp.status_code >= 400:
+            raise CapCutError(f"HTTP {resp.status_code}: {resp.text}")
+        data = resp.json()
+        if data.get("status_code", 0) not in (0, 200) and "status_code" in data:
+            raise CapCutError(f"Query API Error code {data.get('status_code')}: {data.get('message', '')}")
+        return data
 
     def generate_speech(
         self,
@@ -276,12 +283,12 @@ class CapCutTTSClient:
         voice: Optional[str] = "BV421_vivn_streaming",
         resource_id: Optional[str] = None,
         rate: str = "1.0",
-        timeout: float = 60.0,
-        max_retries: int = 5,
+        timeout: float = 12.0,
+        max_retries: int = 3,
     ) -> bytes:
         """
         Generate MP3 audio bytes for a given text.
-        Includes automatic retry and device rotation.
+        Includes automatic retry and device rotation with fast timeout.
         """
         last_exc = None
         for attempt in range(max_retries):
@@ -304,14 +311,14 @@ class CapCutTTSClient:
                         if status in ("success", "succeed"):
                             return self._extract_audio_bytes(task_item)
                         elif status == "failed":
-                            raise CapCutTaskError(f"Task failed: {query_res}")
-                    time.sleep(0.8)
+                            raise CapCutTaskError(f"Task failed: {query_res.get('message') or 'CapCut rejected text'}")
+                    time.sleep(0.6)
 
                 raise CapCutTaskError(f"TTS task timed out after {timeout}s")
             except Exception as exc:
                 last_exc = exc
                 self.randomize_device()
-                time.sleep(1.5 * (attempt + 1))
+                time.sleep(0.8 * (attempt + 1))
 
         raise CapCutError(f"Failed to generate speech after {max_retries} attempts: {last_exc}")
 

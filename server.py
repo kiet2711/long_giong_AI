@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -632,6 +633,54 @@ async def api_cleanup(clear_outputs: bool = False):
         "freed_mb": res["freed_mb"],
         "message": f"Đã dọn dẹp {res['deleted_count']} mục tạm, giải phóng {res['freed_mb']} MB bộ nhớ!",
     }
+
+
+class OpenFileRequest(BaseModel):
+    job_id: Optional[str] = None
+    target: str = "folder"  # "folder", "video", "srt"
+
+
+@app.post("/api/open_file")
+async def open_local_file_or_folder(req: OpenFileRequest):
+    """Open output folder or video directly on Windows host OS."""
+    out_video_path = None
+    out_srt_path = None
+
+    if req.job_id:
+        with job_locks:
+            if req.job_id in jobs_state:
+                job = jobs_state[req.job_id]
+                if job.get("output_path"):
+                    out_video_path = Path(job["output_path"])
+        if not out_video_path:
+            candidate = OUTPUTS_DIR / f"dubbed_{req.job_id}.mp4"
+            if candidate.exists():
+                out_video_path = candidate
+        if out_video_path:
+            out_srt_path = out_video_path.with_suffix(".srt")
+
+    try:
+        if req.target == "video" and out_video_path and out_video_path.exists():
+            os.startfile(str(out_video_path.resolve()))
+            return {"status": "ok", "message": f"Đã mở file: {out_video_path.name}"}
+
+        elif req.target == "srt" and out_srt_path and out_srt_path.exists():
+            os.startfile(str(out_srt_path.resolve()))
+            return {"status": "ok", "message": f"Đã mở file: {out_srt_path.name}"}
+
+        elif req.target == "folder":
+            if out_video_path and out_video_path.exists():
+                subprocess.Popen(f'explorer /select,"{str(out_video_path.resolve())}"')
+            else:
+                subprocess.Popen(f'explorer "{str(OUTPUTS_DIR.resolve())}"')
+            return {"status": "ok", "message": "Đã mở thư mục outputs"}
+
+        else:
+            subprocess.Popen(f'explorer "{str(OUTPUTS_DIR.resolve())}"')
+            return {"status": "ok", "message": "Đã mở thư mục outputs"}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Không thể mở file/thư mục: {e}")
 
 
 @app.websocket("/ws/progress/{job_id}")

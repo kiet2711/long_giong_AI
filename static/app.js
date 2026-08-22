@@ -78,6 +78,8 @@ const el = {
   btnModalClose: document.getElementById('btnModalClose'),
   btnDownloadResult: document.getElementById('btnDownloadResult'),
   btnDownloadSrt: document.getElementById('btnDownloadSrt'),
+  btnOpenVideo: document.getElementById('btnOpenVideo'),
+  btnOpenFolder: document.getElementById('btnOpenFolder'),
 
   // Floating Job Status
   floatingJobPill: document.getElementById('floatingJobPill'),
@@ -369,6 +371,35 @@ function setupEventListeners() {
     el.floatingJobPill.addEventListener('click', () => {
       el.modalBackdrop.classList.add('show');
       el.floatingJobPill.style.display = 'none';
+    });
+  }
+
+  // Open File / Folder actions
+  if (el.btnOpenVideo) {
+    el.btnOpenVideo.addEventListener('click', async () => {
+      try {
+        await fetch('/api/open_file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: state.currentJobId, target: 'video' }),
+        });
+      } catch (e) {
+        console.error(e);
+      }
+    });
+  }
+
+  if (el.btnOpenFolder) {
+    el.btnOpenFolder.addEventListener('click', async () => {
+      try {
+        await fetch('/api/open_file', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: state.currentJobId, target: 'folder' }),
+        });
+      } catch (e) {
+        console.error(e);
+      }
     });
   }
 
@@ -717,6 +748,9 @@ function connectWebSocket(jobId) {
         if (msg.result && msg.result.timeline) {
           updateSubtitlesFromTimeline(msg.result.timeline);
         }
+
+        if (el.btnOpenVideo) el.btnOpenVideo.style.display = 'inline-flex';
+        if (el.btnOpenFolder) el.btnOpenFolder.style.display = 'inline-flex';
 
         if (msg.output_url) {
           el.btnDownloadResult.style.display = 'inline-flex';
