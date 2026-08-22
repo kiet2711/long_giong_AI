@@ -296,12 +296,26 @@ async def start_dubbing(req: StartDubbingRequest):
                 progress_cb=on_progress,
             )
 
+            out_srt_path = OUTPUTS_DIR / f"dubbed_{job_id}.srt"
+            srt_url = None
+            try:
+                if "timeline" in result:
+                    timeline_objs = [
+                        TimelineSegment(**s) if isinstance(s, dict) else s
+                        for s in result["timeline"]
+                    ]
+                    SRTParser.export_synced_srt(timeline_objs, out_srt_path)
+                    srt_url = f"/temp/outputs/{out_srt_path.name}"
+            except Exception:
+                pass
+
             with job_locks:
                 jobs_state[job_id]["status"] = "completed"
                 jobs_state[job_id]["percent"] = 100.0
                 jobs_state[job_id]["stage"] = "completed"
                 jobs_state[job_id]["output_path"] = str(out_video_path)
                 jobs_state[job_id]["output_url"] = f"/temp/outputs/{out_video_path.name}"
+                jobs_state[job_id]["output_srt_url"] = srt_url
                 jobs_state[job_id]["result"] = result
 
             async def final_broadcast():
@@ -310,8 +324,9 @@ async def start_dubbing(req: StartDubbingRequest):
                     {
                         "percent": 100.0,
                         "stage": "completed",
-                        "message": "Hoàn tất! Video đã sẵn sàng tải về.",
+                        "message": "Hoàn tất! Video & Phụ đề SRT đã sẵn sàng tải về.",
                         "output_url": f"/temp/outputs/{out_video_path.name}",
+                        "output_srt_url": srt_url,
                         "result": result,
                     },
                 )

@@ -46,6 +46,19 @@ def format_time_str(seconds: float) -> str:
     return f"{m:02d}:{s:04.1f}"
 
 
+def format_srt_timestamp(seconds: float) -> str:
+    """Convert seconds to SRT timestamp 'HH:MM:SS,mmm'."""
+    seconds = max(0.0, seconds)
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int(round((seconds - int(seconds)) * 1000))
+    if millis >= 1000:
+        secs += 1
+        millis = 0
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
 @dataclass
 class SubtitleItem:
     """Single subtitle line item."""
@@ -230,3 +243,36 @@ class SRTParser:
             )
 
         return segments
+
+    @classmethod
+    def export_synced_srt(
+        cls,
+        timeline_segs: List[TimelineSegment],
+        output_srt_path: Union[str, Path],
+    ) -> Path:
+        """Export newly shifted & aligned SRT file corresponding to the final video timeline."""
+        out_path = Path(output_srt_path)
+        lines = []
+        sub_index = 1
+        current_out_time = 0.0
+
+        for seg in timeline_segs:
+            if seg.seg_type == "dub":
+                v_speed = seg.video_speed_applied or 1.0
+                seg_out_duration = seg.duration_sec / max(0.1, v_speed)
+                start_t = current_out_time
+                end_t = current_out_time + seg_out_duration
+
+                lines.append(f"{sub_index}")
+                lines.append(f"{format_srt_timestamp(start_t)} --> {format_srt_timestamp(end_t)}")
+                lines.append(seg.text_dub)
+                lines.append("")
+
+                sub_index += 1
+                current_out_time += seg_out_duration
+            else:
+                # Gap segment duration in final video
+                current_out_time += seg.duration_sec
+
+        out_path.write_text("\n".join(lines), encoding="utf-8")
+        return out_path

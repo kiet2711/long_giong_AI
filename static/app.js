@@ -77,6 +77,7 @@ const el = {
   logBox: document.getElementById('logBox'),
   btnModalClose: document.getElementById('btnModalClose'),
   btnDownloadResult: document.getElementById('btnDownloadResult'),
+  btnDownloadSrt: document.getElementById('btnDownloadSrt'),
 };
 
 // --- Initialization ---
@@ -581,6 +582,7 @@ async function startDubbingProcess() {
   el.statusMsg.textContent = 'Đang khởi tạo tiến trình...';
   el.logBox.innerHTML = '';
   el.btnDownloadResult.style.display = 'none';
+  if (el.btnDownloadSrt) el.btnDownloadSrt.style.display = 'none';
 
   try {
     const res = await fetch('/api/start_dubbing', {
@@ -643,6 +645,13 @@ function connectWebSocket(jobId) {
           };
           // Automatically load final dubbed video into player
           loadVideoIntoPlayer(msg.output_url);
+        }
+
+        if (msg.output_srt_url && el.btnDownloadSrt) {
+          el.btnDownloadSrt.style.display = 'inline-flex';
+          el.btnDownloadSrt.onclick = () => {
+            window.open(msg.output_srt_url, '_blank');
+          };
         }
       } else if (msg.stage === 'failed') {
         el.modalTitle.textContent = '❌ Quá trình Render gặp lỗi';
