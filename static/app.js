@@ -49,6 +49,19 @@ const el = {
   threadsValue: document.getElementById('threadsValue'),
   btnStartDubbing: document.getElementById('btnStartDubbing'),
 
+  // Gemini AI Settings & Key Pool
+  btnHeaderGeminiSettings: document.getElementById('btnHeaderGeminiSettings'),
+  headerGeminiKeyBadge: document.getElementById('headerGeminiKeyBadge'),
+  geminiSettingsModalBackdrop: document.getElementById('geminiSettingsModalBackdrop'),
+  modalGeminiModelSelect: document.getElementById('modalGeminiModelSelect'),
+  modalGeminiKeysInput: document.getElementById('modalGeminiKeysInput'),
+  modalKeyPoolCountBadge: document.getElementById('modalKeyPoolCountBadge'),
+  btnTestGeminiConnection: document.getElementById('btnTestGeminiConnection'),
+  geminiTestStatusBox: document.getElementById('geminiTestStatusBox'),
+  btnCloseGeminiSettingsModal: document.getElementById('btnCloseGeminiSettingsModal'),
+  btnSaveGeminiSettings: document.getElementById('btnSaveGeminiSettings'),
+
+
 
   // Video Player
   mainVideo: document.getElementById('mainVideo'),
@@ -147,8 +160,10 @@ document.addEventListener('DOMContentLoaded', () => {
   updateSpeedLimitsUI();
   updateGapBorrowUI();
   updateCacheStatsBadge();
+  updateGeminiKeyCountUI();
   checkAndRestoreActiveJob();
 });
+
 
 function updateSpeedLimitsUI() {
   // Audio Speed Range (0.70 to 1.80, total span = 1.10)
@@ -458,7 +473,158 @@ function setupEventListeners() {
       checkSubtitlesCache();
     });
   }
+
+  // Gemini AI Settings Modal Listeners
+  if (el.btnHeaderGeminiSettings) {
+    el.btnHeaderGeminiSettings.addEventListener('click', openGeminiSettingsModal);
+  }
+  if (el.btnCloseGeminiSettingsModal) {
+    el.btnCloseGeminiSettingsModal.addEventListener('click', closeGeminiSettingsModal);
+  }
+  if (el.geminiSettingsModalBackdrop) {
+    el.geminiSettingsModalBackdrop.addEventListener('click', (e) => {
+      if (e.target === el.geminiSettingsModalBackdrop) closeGeminiSettingsModal();
+    });
+  }
+  if (el.btnSaveGeminiSettings) {
+    el.btnSaveGeminiSettings.addEventListener('click', saveGeminiSettings);
+  }
+  if (el.btnTestGeminiConnection) {
+    el.btnTestGeminiConnection.addEventListener('click', testGeminiConnection);
+  }
+  if (el.modalGeminiKeysInput) {
+    el.modalGeminiKeysInput.addEventListener('input', () => {
+      const raw = el.modalGeminiKeysInput.value;
+      const count = raw.replace(/,/g, '\n').split('\n').map(k => k.trim()).filter(Boolean).length;
+      if (el.modalKeyPoolCountBadge) {
+        el.modalKeyPoolCountBadge.textContent = `${count} Key sẵn sàng`;
+      }
+    });
+  }
 }
+
+// --- Gemini AI Settings Functions ---
+function getStoredGeminiKeys() {
+  try {
+    const raw = localStorage.getItem('gemini_api_keys');
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.map(k => k.trim()).filter(Boolean);
+    } catch (e) {}
+    return raw.replace(/,/g, '\n').split('\n').map(k => k.trim()).filter(Boolean);
+  } catch (e) {
+    return [];
+  }
+}
+
+function getStoredGeminiModel() {
+  try {
+    return localStorage.getItem('gemini_model') || 'gemini-2.5-flash-lite';
+  } catch (e) {
+    return 'gemini-2.5-flash-lite';
+  }
+}
+
+function updateGeminiKeyCountUI() {
+  const keys = getStoredGeminiKeys();
+  const count = keys.length;
+  if (el.headerGeminiKeyBadge) {
+    el.headerGeminiKeyBadge.textContent = `${count} Key sẵn sàng`;
+  }
+  if (el.modalKeyPoolCountBadge) {
+    el.modalKeyPoolCountBadge.textContent = `${count} Key sẵn sàng`;
+  }
+}
+
+function openGeminiSettingsModal() {
+  if (el.modalGeminiKeysInput) {
+    const keys = getStoredGeminiKeys();
+    el.modalGeminiKeysInput.value = keys.join('\n');
+  }
+  if (el.modalGeminiModelSelect) {
+    el.modalGeminiModelSelect.value = getStoredGeminiModel();
+  }
+  if (el.geminiTestStatusBox) {
+    el.geminiTestStatusBox.style.display = 'none';
+  }
+  updateGeminiKeyCountUI();
+  if (el.geminiSettingsModalBackdrop) {
+    el.geminiSettingsModalBackdrop.classList.add('show');
+  }
+}
+
+function closeGeminiSettingsModal() {
+  if (el.geminiSettingsModalBackdrop) {
+    el.geminiSettingsModalBackdrop.classList.remove('show');
+  }
+}
+
+function saveGeminiSettings() {
+  if (el.modalGeminiKeysInput) {
+    const raw = el.modalGeminiKeysInput.value;
+    const cleanKeys = raw.replace(/,/g, '\n').split('\n').map(k => k.trim()).filter(Boolean);
+    try {
+      localStorage.setItem('gemini_api_keys', JSON.stringify(cleanKeys));
+    } catch (e) {}
+  }
+  if (el.modalGeminiModelSelect) {
+    try {
+      localStorage.setItem('gemini_model', el.modalGeminiModelSelect.value);
+    } catch (e) {}
+  }
+  updateGeminiKeyCountUI();
+  closeGeminiSettingsModal();
+}
+
+async function testGeminiConnection() {
+  const raw = el.modalGeminiKeysInput ? el.modalGeminiKeysInput.value : '';
+  const cleanKeys = raw.replace(/,/g, '\n').split('\n').map(k => k.trim()).filter(Boolean);
+  const model = el.modalGeminiModelSelect ? el.modalGeminiModelSelect.value : 'gemini-2.5-flash-lite';
+  const firstKey = cleanKeys.length > 0 ? cleanKeys[0] : null;
+
+  if (!firstKey) {
+    alert('Vui lòng nhập ít nhất 1 Gemini API Key trước khi kiểm tra!');
+    return;
+  }
+
+  if (el.geminiTestStatusBox) {
+    el.geminiTestStatusBox.style.display = 'block';
+    el.geminiTestStatusBox.style.background = 'rgba(59, 130, 246, 0.1)';
+    el.geminiTestStatusBox.style.color = '#60A5FA';
+    el.geminiTestStatusBox.style.border = '1px solid rgba(59, 130, 246, 0.3)';
+    el.geminiTestStatusBox.innerHTML = `⏳ Đang kiểm tra kết nối với <b>${model}</b>...`;
+  }
+
+  try {
+    const res = await fetch('/api/gemini/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: firstKey, model: model }),
+    });
+    const data = await res.json();
+
+    if (data.success) {
+      el.geminiTestStatusBox.style.background = 'rgba(16, 185, 129, 0.1)';
+      el.geminiTestStatusBox.style.color = 'var(--teal)';
+      el.geminiTestStatusBox.style.border = '1px solid rgba(16, 185, 129, 0.3)';
+      el.geminiTestStatusBox.innerHTML = `✅ Kết nối thành công! Key: <b>${data.masked_key}</b> | Model: <b>${data.model}</b> | Độ trễ: <b>${data.latency_ms}ms</b>`;
+    } else {
+      el.geminiTestStatusBox.style.background = 'rgba(239, 68, 68, 0.1)';
+      el.geminiTestStatusBox.style.color = '#F87171';
+      el.geminiTestStatusBox.style.border = '1px solid rgba(239, 68, 68, 0.3)';
+      el.geminiTestStatusBox.innerHTML = `❌ Lỗi kết nối: ${data.error || 'Không xác định'}`;
+    }
+  } catch (err) {
+    if (el.geminiTestStatusBox) {
+      el.geminiTestStatusBox.style.background = 'rgba(239, 68, 68, 0.1)';
+      el.geminiTestStatusBox.style.color = '#F87171';
+      el.geminiTestStatusBox.style.border = '1px solid rgba(239, 68, 68, 0.3)';
+      el.geminiTestStatusBox.innerHTML = `❌ Lỗi gọi API: ${err.message}`;
+    }
+  }
+}
+
 
 // --- Cache & Project Management Functions ---
 async function updateCacheStatsBadge() {

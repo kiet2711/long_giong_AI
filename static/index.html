@@ -23,6 +23,9 @@
         <div class="sub">Tạo giọng đọc AI từ SRT → Cắt & Khớp tốc độ video/audio → Ghép nối siêu tốc không cần CapCut PC</div>
       </div>
       <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+        <button class="btn" id="btnHeaderGeminiSettings" style="background: rgba(168, 85, 247, 0.15); border: 1px solid rgba(168, 85, 247, 0.4); color: #DDD6FE; font-size: 12px; padding: 6px 14px; gap: 6px; margin-top: 4px; cursor: pointer;" title="Cấu hình Gemini API Keys (Xoay vòng Key) và chọn Model AI">
+          <span>🔑</span> Cài đặt Gemini AI (<span id="headerGeminiKeyBadge" style="font-weight: 600; color: #C084FC;">0 Key</span>)
+        </button>
         <button class="btn btn-teal" id="btnOpenProjects" style="font-size: 12px; padding: 6px 14px; gap: 6px; margin-top: 4px;" title="Xem danh sách các dự án trước đây để mở lại hoặc tiếp tục">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
           📂 Quản Lý / Mở Dự Án Cũ
@@ -32,6 +35,7 @@
           Dọn dẹp rác bộ nhớ
         </button>
       </div>
+
     </div>
   </header>
 
@@ -323,11 +327,61 @@
     </div>
   </section>
 
+  <!-- GEMINI AI SETTINGS & KEY POOL MODAL -->
+  <div class="modal-backdrop" id="geminiSettingsModalBackdrop">
+    <div class="modal-box" style="max-width: 520px;">
+      <div class="modal-header">
+        <div class="modal-title">🔑 Cấu hình Gemini AI & Xoay Vòng Key Pool</div>
+        <div class="modal-sub" style="color: var(--muted); font-size: 12px; margin-top: 4px;">
+          Tự động xoay vòng API Key khi gặp Rate Limit (429) hoặc lỗi Key.
+        </div>
+      </div>
+      
+      <div class="form-group" style="margin-top: 14px;">
+        <label>Chọn Model Gemini AI Mặc Định</label>
+        <select id="modalGeminiModelSelect" style="width: 100%; padding: 8px 12px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; font-size: 12px;">
+          <option value="gemini-2.5-flash-lite" selected>⚡ Gemini 2.5 Flash Lite (Siêu nhanh, 15 RPM / 500 RPD - Khuyên dùng)</option>
+          <option value="gemini-3.5-flash-lite">⚡ Gemini 3.5 Flash Lite (Tối ưu)</option>
+          <option value="gemini-2.5-flash">🌟 Gemini 2.5 Flash (Chất lượng cao)</option>
+          <option value="gemini-3.6-flash">🌟 Gemini 3.6 Flash (Mới nhất)</option>
+          <option value="gemini-3.7-flash">🌟 Gemini 3.7 Flash</option>
+          <option value="gemini-2.0-flash">💎 Gemini 2.0 Flash (Chuẩn)</option>
+          <option value="gemini-1.5-flash">💎 Gemini 1.5 Flash (Ổn định)</option>
+        </select>
+      </div>
+
+      <div class="form-group" style="margin-top: 12px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+          <label style="margin: 0;">Danh sách Gemini API Keys (Mỗi dòng 1 Key)</label>
+          <span id="modalKeyPoolCountBadge" style="font-size: 11px; color: var(--teal); font-family: 'JetBrains Mono', monospace;">0 Key sẵn sàng</span>
+        </div>
+        <textarea id="modalGeminiKeysInput" rows="5" placeholder="AIzaSy...&#10;AIzaSy...&#10;AIzaSy..." style="width: 100%; font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 8px 10px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; resize: vertical;"></textarea>
+        <div style="font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.4;">
+          * Bạn có thể dán 1 Key hoặc nhiều Key (mỗi dòng 1 Key). Khi 1 Key bị chạm trần hạn mức 429, hệ thống sẽ tự động chuyển sang Key tiếp theo.<br>
+          * Nhận API Key hoàn toàn miễn phí tại: <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color: var(--teal); text-decoration: underline;">Google AI Studio</a>
+        </div>
+      </div>
+
+      <div id="geminiTestStatusBox" style="display: none; padding: 8px 12px; border-radius: 6px; font-size: 11px; margin-top: 10px; font-family: 'JetBrains Mono', monospace;"></div>
+
+      <div class="modal-actions" style="margin-top: 16px; display: flex; justify-content: space-between; align-items: center;">
+        <button type="button" class="btn" id="btnTestGeminiConnection" style="font-size: 11px; background: rgba(59, 130, 246, 0.15); border: 1px solid rgba(59, 130, 246, 0.3); color: #60A5FA;">
+          ⚡ Kiểm tra kết nối
+        </button>
+        <div style="display: flex; gap: 8px;">
+          <button type="button" class="btn" id="btnCloseGeminiSettingsModal">Đóng</button>
+          <button type="button" class="btn btn-teal" id="btnSaveGeminiSettings">Lưu Cấu Hình</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- PROJECTS MANAGEMENT MODAL -->
   <div class="modal-backdrop" id="projectsModalBackdrop">
     <div class="modal-box projects-modal">
       <div class="modal-header">
         <div class="modal-title">📂 Quản Lý & Mở Lại Dự Án Cũ</div>
+
         <div class="modal-sub" style="color: var(--muted); font-size: 13px; margin-top: 4px;">
           Chọn dự án đã từng tải lên để mở lại video, phụ đề và tận dụng các câu âm thanh đã tạo sẵn trong Cache
         </div>

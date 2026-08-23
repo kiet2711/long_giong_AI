@@ -14,7 +14,7 @@ import time
 import uuid
 import webbrowser
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import (
     FastAPI,
@@ -32,6 +32,7 @@ from pydantic import BaseModel
 
 from core.capcut_stt import ChunkedSTTPipeline
 from core.ffmpeg_engine import FFmpegDubbingEngine, get_video_metadata
+from core.gemini_client import AVAILABLE_GEMINI_MODELS, GeminiClient, GeminiKeyPool
 from core.project_manager import ProjectManager
 from core.srt_parser import SRTParser, SubtitleItem, TimelineSegment
 from core.tts_client import CapCutTTSClient, VoiceCatalog
@@ -56,6 +57,10 @@ voice_catalog = VoiceCatalog()
 project_manager = ProjectManager(base_dir=BASE_DIR, tts_client=tts_client)
 stt_pipeline = ChunkedSTTPipeline(temp_dir=TEMP_DIR / "stt_pipeline", max_workers=3)
 stt_tasks: Dict[str, Dict[str, Any]] = {}
+
+gemini_key_pool = GeminiKeyPool()
+gemini_client = GeminiClient(gemini_key_pool, default_model="gemini-2.5-flash-lite")
+
 
 app = FastAPI(title="AI Dubbing & Video Sync Studio")
 
@@ -250,6 +255,66 @@ async def check_cache(req: CheckCacheRequest):
 async def get_cache_stats():
     """Get persistent TTS cache statistics."""
     return tts_client.get_cache_stats()
+
+
+# =========================================================================
+# Gemini AI API Endpoints (Standardized Key Pool & Multi-Model Execution)
+# =========================================================================
+
+@app.get("/api/gemini/models")
+async def get_gemini_models():
+    """Get list of supported Gemini AI models and active key pool statistics."""
+    return {
+        "models": AVAILABLE_GEMINI_MODELS,
+        "active_keys_count": gemini_key_pool.total_keys,
+        "keys_info": gemini_key_pool.get_keys_info(),
+        "default_model": gemini_client.default_model,
+    }
+
+
+class GeminiTestRequest(BaseModel):
+    api_key: Optional[str] = None
+    model: Optional[str] = "gemini-2.5-flash-lite"
+
+
+@app.post("/api/gemini/test")
+async def test_gemini_connection(req: GeminiTestRequest):
+    """Test connection to Gemini API and measure response latency."""
+    return gemini_client.test_connection(api_key=req.api_key, model=req.model)
+
+
+class GeminiGenerateRequest(BaseModel):
+    prompt: str
+    system_instruction: Optional[str] = None
+    model: Optional[str] = None
+    temperature: Optional[float] = 0.7
+    max_output_tokens: Optional[int] = 4096
+    json_mode: Optional[bool] = False
+    api_keys: Optional[Union[List[str], str]] = None
+
+
+@app.post("/api/gemini/generate")
+async def generate_gemini_content(req: GeminiGenerateRequest):
+    """Generic Gemini content generation endpoint."""
+    if req.api_keys:
+        local_pool = GeminiKeyPool(req.api_keys)
+        client = GeminiClient(local_pool, default_model=req.model or "gemini-2.5-flash-lite")
+    else:
+        client = gemini_client
+
+    try:
+        result = client.generate_content(
+            prompt=req.prompt,
+            system_instruction=req.system_instruction,
+            model=req.model,
+            temperature=req.temperature if req.temperature is not None else 0.7,
+            max_output_tokens=req.max_output_tokens or 4096,
+            json_mode=req.json_mode or False,
+        )
+        return {"success": True, "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.post("/api/upload_files")
