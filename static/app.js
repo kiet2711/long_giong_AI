@@ -106,8 +106,10 @@ const el = {
   failedReviewContainer: document.getElementById('failedReviewContainer'),
   failedCountBadge: document.getElementById('failedCountBadge'),
   failedList: document.getElementById('failedList'),
+  btnGeminiFixAllFailed: document.getElementById('btnGeminiFixAllFailed'),
   btnRetryAllFailed: document.getElementById('btnRetryAllFailed'),
   btnSkipFailedAndRender: document.getElementById('btnSkipFailedAndRender'),
+
 
   // Live Render HUD
   renderStatsHud: document.getElementById('renderStatsHud'),
@@ -442,12 +444,16 @@ function setupEventListeners() {
   }
 
   // Failed Review actions
+  if (el.btnGeminiFixAllFailed) {
+    el.btnGeminiFixAllFailed.addEventListener('click', fixAllFailedSegmentsWithGemini);
+  }
   if (el.btnRetryAllFailed) {
     el.btnRetryAllFailed.addEventListener('click', retryAllFailedSegments);
   }
   if (el.btnSkipFailedAndRender) {
     el.btnSkipFailedAndRender.addEventListener('click', resumeDubbingRender);
   }
+
 
   // Projects Modal Events
   if (el.btnOpenProjects) {
@@ -1337,9 +1343,12 @@ function renderFailedSegmentsReview(failedSegments) {
       : '';
 
     itemDiv.innerHTML = `
-      <div style="display: flex; align-items: center; gap: 10px; width: 100%;">
+      <div style="display: flex; align-items: center; gap: 8px; width: 100%; flex-wrap: wrap;">
         <div class="failed-item-idx">#${String(seg.seg_id).padStart(2, '0')}</div>
-        <input type="text" class="failed-item-input" id="failed-input-${seg.seg_id}" value="${escapeHtml(seg.text_dub)}" placeholder="Nhập câu tiếng Việt thay thế..." />
+        <input type="text" class="failed-item-input" id="failed-input-${seg.seg_id}" value="${escapeHtml(seg.text_dub)}" placeholder="Nhập câu tiếng Việt thay thế..." style="flex: 1; min-width: 180px;" />
+        <button class="failed-item-btn" id="btn-gemini-${seg.seg_id}" style="background: rgba(139, 92, 246, 0.15); color: #C4B5FD; border: 1px solid rgba(139, 92, 246, 0.35); font-weight: 600;" title="Dùng Gemini AI dịch hoặc sửa từ nhạy cảm">
+          <span>🪄</span> Dịch AI
+        </button>
         <button class="failed-item-btn" id="btn-retry-${seg.seg_id}">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
           Thử lại
@@ -1351,8 +1360,54 @@ function renderFailedSegmentsReview(failedSegments) {
     `;
 
     const retryBtn = itemDiv.querySelector(`#btn-retry-${seg.seg_id}`);
+    const geminiBtn = itemDiv.querySelector(`#btn-gemini-${seg.seg_id}`);
     const inputEl = itemDiv.querySelector(`#failed-input-${seg.seg_id}`);
     const errContainer = itemDiv.querySelector(`#failed-err-${seg.seg_id}`);
+
+    // Single Gemini AI Translate & Fix Button
+    geminiBtn.addEventListener('click', async () => {
+      const currentVal = inputEl.value.trim();
+      if (!currentVal) return;
+
+      geminiBtn.disabled = true;
+      geminiBtn.innerHTML = '🪄 Đang dịch...';
+      if (errContainer) errContainer.innerHTML = '<div style="color: #A78BFA; font-size: 11px; margin-top: 4px;">🪄 Đang gọi Gemini AI dịch/sửa câu...</div>';
+
+      try {
+        const res = await fetch('/api/gemini/fix_failed_subtitles', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            segments: [{ seg_id: seg.seg_id, text_dub: currentVal }],
+            api_keys: getStoredGeminiKeys(),
+            model: getStoredGeminiModel(),
+          }),
+        });
+        const data = await res.json();
+        const fixedItem = (data.results || [])[0];
+
+        if (fixedItem && fixedItem.fixed_text) {
+          inputEl.value = fixedItem.fixed_text;
+          inputEl.style.borderColor = '#A78BFA';
+          if (errContainer) {
+            errContainer.innerHTML = `<div style="color: #34D399; font-size: 11px; margin-top: 4px;">🪄 Đã dịch: "${escapeHtml(fixedItem.fixed_text)}" -> Đang tạo lại giọng đọc...</div>`;
+          }
+          appendLog(`[GEMINI AI] Câu #${seg.seg_id} đã dịch: "${fixedItem.fixed_text}"`);
+          geminiBtn.disabled = false;
+          geminiBtn.innerHTML = '<span>🪄</span> Dịch AI';
+          // Automatically trigger retry TTS
+          retryBtn.click();
+        } else {
+          geminiBtn.disabled = false;
+          geminiBtn.innerHTML = '<span>🪄</span> Dịch AI';
+          if (errContainer) errContainer.innerHTML = '<div style="color: #F87171; font-size: 11px; margin-top: 4px;">❌ Không nhận được phản hồi từ Gemini.</div>';
+        }
+      } catch (err) {
+        geminiBtn.disabled = false;
+        geminiBtn.innerHTML = '<span>🪄</span> Dịch AI';
+        if (errContainer) errContainer.innerHTML = `<div style="color: #F87171; font-size: 11px; margin-top: 4px;">❌ Lỗi gọi Gemini: ${escapeHtml(err.message)}</div>`;
+      }
+    });
 
     retryBtn.addEventListener('click', async () => {
       retryBtn.disabled = true;
@@ -1378,6 +1433,7 @@ function renderFailedSegmentsReview(failedSegments) {
           retryBtn.className = 'failed-item-btn btn-done';
           retryBtn.innerHTML = '✅ Đã tạo';
           retryBtn.disabled = true;
+          if (geminiBtn) geminiBtn.style.display = 'none';
           inputEl.disabled = true;
           if (errContainer) errContainer.innerHTML = '<div style="color: #34D399; font-size: 11px; margin-top: 4px;">✅ Tạo âm thanh AI thành công!</div>';
           appendLog(`[HỆ THỐNG] Câu #${seg.seg_id} đã tạo âm thanh thành công.`);
@@ -1408,6 +1464,77 @@ function renderFailedSegmentsReview(failedSegments) {
     el.failedList.appendChild(itemDiv);
   });
 }
+
+// --- Batch Gemini Fix All Failed Segments with Multi-Threading ---
+async function fixAllFailedSegmentsWithGemini() {
+  if (!el.failedList || !state.currentJobId) return;
+  const items = el.failedList.querySelectorAll('.failed-item:not(.success)');
+  if (items.length === 0) {
+    resumeDubbingRender();
+    return;
+  }
+
+  const segmentsToFix = [];
+  items.forEach((item) => {
+    const segId = parseInt(item.id.replace('failed-item-', ''), 10);
+    const inputEl = item.querySelector('.failed-item-input');
+    segmentsToFix.push({ seg_id: segId, text_dub: inputEl ? inputEl.value : '' });
+  });
+
+  const storedKeys = getStoredGeminiKeys();
+  const concurrency = Math.max(1, Math.min(storedKeys.length || 5, 10));
+
+  if (el.btnGeminiFixAllFailed) {
+    el.btnGeminiFixAllFailed.disabled = true;
+    el.btnGeminiFixAllFailed.innerHTML = `🪄 Đang xoay vòng Gemini Keys dịch ${segmentsToFix.length} câu...`;
+  }
+
+  appendLog(`[GEMINI AI] Bắt đầu dịch & sửa đồng loạt ${segmentsToFix.length} câu lỗi (${concurrency} luồng)...`);
+
+  try {
+    const res = await fetch('/api/gemini/fix_failed_subtitles', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        segments: segmentsToFix,
+        api_keys: storedKeys,
+        model: getStoredGeminiModel(),
+        concurrency: concurrency,
+      }),
+    });
+    const data = await res.json();
+    const results = data.results || [];
+
+    results.forEach((r) => {
+      const inputEl = document.querySelector(`#failed-input-${r.seg_id}`);
+      const errContainer = document.querySelector(`#failed-err-${r.seg_id}`);
+      if (inputEl && r.fixed_text) {
+        inputEl.value = r.fixed_text;
+        inputEl.style.borderColor = '#A78BFA';
+      }
+      if (errContainer && r.fixed_text) {
+        errContainer.innerHTML = `<div style="color: #34D399; font-size: 11px; margin-top: 4px;">🪄 Gemini đã dịch: "${escapeHtml(r.fixed_text)}"</div>`;
+      }
+    });
+
+    appendLog(`[GEMINI AI] Đã dịch xong toàn bộ ${results.length} câu! Đang tự động thử tạo giọng đọc đồng loạt...`);
+
+    if (el.btnGeminiFixAllFailed) {
+      el.btnGeminiFixAllFailed.disabled = false;
+      el.btnGeminiFixAllFailed.innerHTML = '<span>🪄</span> Dịch / Sửa tất cả câu lỗi bằng Gemini AI';
+    }
+
+    // Automatically trigger retryAllFailedSegments
+    setTimeout(retryAllFailedSegments, 500);
+  } catch (err) {
+    appendLog(`[GEMINI LỖI] ${err.message}`);
+    if (el.btnGeminiFixAllFailed) {
+      el.btnGeminiFixAllFailed.disabled = false;
+      el.btnGeminiFixAllFailed.innerHTML = '<span>🪄</span> Dịch / Sửa tất cả câu lỗi bằng Gemini AI';
+    }
+  }
+}
+
 
 async function retryAllFailedSegments() {
   if (!el.failedList || !state.currentJobId) return;

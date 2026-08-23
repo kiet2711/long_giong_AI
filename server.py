@@ -316,6 +316,35 @@ async def generate_gemini_content(req: GeminiGenerateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class GeminiFixFailedRequest(BaseModel):
+    segments: List[Dict[str, Any]]
+    model: Optional[str] = "gemini-2.5-flash-lite"
+    api_keys: Optional[Union[List[str], str]] = None
+    concurrency: Optional[int] = 5
+
+
+@app.post("/api/gemini/fix_failed_subtitles")
+async def fix_failed_subtitles(req: GeminiFixFailedRequest):
+    """Translate and fix failed/sensitive subtitle segments using Gemini AI."""
+    if req.api_keys:
+        local_pool = GeminiKeyPool(req.api_keys)
+        client = GeminiClient(local_pool, default_model=req.model or "gemini-2.5-flash-lite")
+    else:
+        client = gemini_client
+
+    concurrency = max(1, min(req.concurrency or 5, client.key_pool.total_keys if client.key_pool.total_keys > 0 else 5))
+    try:
+        fixed_results = client.fix_and_translate_failed_segments(
+            items=req.segments,
+            model=req.model,
+            concurrency=concurrency,
+        )
+        return {"success": True, "results": fixed_results}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
 
 @app.post("/api/upload_files")
 async def upload_files(

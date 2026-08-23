@@ -429,7 +429,10 @@
         
         <div class="failed-list" id="failedList"></div>
         
-        <div class="failed-actions-bar">
+        <div class="failed-actions-bar" style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <button class="btn btn-sm" id="btnGeminiFixAllFailed" style="background: linear-gradient(135deg, #8B5CF6, #6D28D9); color: #fff; border: 1px solid rgba(139, 92, 246, 0.4); font-weight: 600; padding: 6px 12px;">
+            <span>🪄</span> Dịch / Sửa tất cả câu lỗi bằng Gemini AI
+          </button>
           <button class="btn btn-teal btn-sm" id="btnRetryAllFailed">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
             Thử tạo lại tất cả câu lỗi
@@ -439,6 +442,7 @@
             Bỏ qua & Tiếp tục Render Video
           </button>
         </div>
+
       </div>
 
       <div class="modal-actions">

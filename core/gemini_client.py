@@ -7,6 +7,7 @@ Standardized architecture inspired by truyen-ngan:
 4. Connection testing and latency benchmarking.
 """
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import requests
+
 
 logger = logging.getLogger(__name__)
 
@@ -285,3 +287,129 @@ class GeminiClient:
         except Exception as e:
             latency_ms = round((time.time() - start_time) * 1000)
             return {"success": False, "error": str(e), "latency_ms": latency_ms}
+
+    def fix_and_translate_failed_segments(
+        self,
+        items: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        concurrency: int = 5,
+        progress_cb: Optional[Callable[[int, int, str], None]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Multi-threaded translation & paraphrasing of failed subtitle segments.
+        Converts foreign text (Chinese, English...) to natural Vietnamese,
+        and paraphrases sensitive/blocked words so CapCut TTS accepts them.
+        """
+        if not items:
+            return []
+
+        effective_model = model or self.default_model
+
+        if len(items) <= 10 or concurrency <= 1:
+            return self._fix_batch_json(items, model=effective_model, progress_cb=progress_cb)
+
+        chunk_size = 5
+        chunks = [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+        results: List[Dict[str, Any]] = []
+        completed = 0
+        total = len(items)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(concurrency, len(chunks))) as executor:
+            future_to_chunk = {
+                executor.submit(self._fix_batch_json, chunk, model=effective_model): chunk
+                for chunk in chunks
+            }
+            for future in concurrent.futures.as_completed(future_to_chunk):
+                chunk_res = future.result()
+                results.extend(chunk_res)
+                completed += len(chunk_res)
+                if progress_cb:
+                    progress_cb(completed, total, f"Đã dịch/sửa {completed}/{total} câu...")
+
+        results.sort(key=lambda x: x.get("seg_id", 0))
+        return results
+
+    def _fix_batch_json(
+        self,
+        items: List[Dict[str, Any]],
+        model: str,
+        progress_cb: Optional[Callable[[int, int, str], None]] = None,
+    ) -> List[Dict[str, Any]]:
+        system_instruction = (
+            "Bạn là chuyên gia dịch thuật và biên tập lời thoại lồng tiếng video chuyên nghiệp.\n\n"
+            "BỐI CẢNH: Các dòng phụ đề này vừa bị hệ thống tạo giọng đọc AI (Text-To-Speech / CapCut TTS) từ chối phát âm "
+            "do dính một trong các nguyên nhân: chứa chữ nước ngoài (chữ Hán/Trung, tiếng Anh, Hàn...), "
+            "chứa từ ngữ nhạy cảm/bạo lực/thô tục, hoặc ký tự lạ.\n\n"
+            "NHIỆM VỤ & QUY TẮC BIÊN TẬP:\n"
+            "1. NẾU LÀ TIẾNG NƯỚC NGOÀI (Chữ Hán/Trung Quốc, tiếng Anh, Hàn...): "
+            "Dịch chuẩn xác sang tiếng Việt tự nhiên, đúng ngữ cảnh đối thoại phim ảnh/lồng tiếng. "
+            "Nếu là từ đơn lẻ/tên riêng chữ Hán (như '漢', '好', '快'): Dịch nghĩa hoặc chuyển âm Hán-Việt phù hợp ngữ cảnh đối thoại.\n"
+            "2. NẾU LÀ TỪ NHẠY CẢM / TỪ BỊ BỘ LỌC CHẶN: "
+            "Viết lại (paraphrase) bằng từ đồng nghĩa lịch sự, trong sáng nhưng giữ nguyên 100% ý đồ nhân vật để bộ đọc AI chấp nhận 100%.\n"
+            "3. VĂN PHONG LỒNG TIẾNG: "
+            "Ngắn gọn, súc tích, mượt mà như lời nói đời thường, không kèm giải thích thừa.\n"
+            "4. ĐỊNH DẠNG ĐẦU RA: Bắt buộc trả về JSON danh sách: [{\"seg_id\": id, \"fixed_text\": \"câu tiếng Việt hoàn thiện\"}]."
+        )
+
+        prompt_items = [
+            {"seg_id": item["seg_id"], "text": item.get("text_dub") or item.get("text") or ""}
+            for item in items
+        ]
+        prompt = (
+            "Hãy dịch sang tiếng Việt và biên tập lại các câu phụ đề sau để bộ đọc AI phát âm chuẩn không bị lỗi:\n"
+            + json.dumps(prompt_items, ensure_ascii=False, indent=2)
+        )
+
+
+        try:
+            raw_response = self.generate_content(
+                prompt=prompt,
+                system_instruction=system_instruction,
+                model=model,
+                temperature=0.3,
+                json_mode=True,
+                timeout_sec=25,
+            )
+
+            clean_json = raw_response.strip()
+            if clean_json.startswith("```json"):
+                clean_json = clean_json[7:]
+            if clean_json.startswith("```"):
+                clean_json = clean_json[3:]
+            if clean_json.endswith("```"):
+                clean_json = clean_json[:-3]
+            clean_json = clean_json.strip()
+
+            parsed = json.loads(clean_json)
+            if isinstance(parsed, dict) and "results" in parsed:
+                parsed = parsed["results"]
+            if isinstance(parsed, dict) and "subtitles" in parsed:
+                parsed = parsed["subtitles"]
+
+            fixed_map = {}
+            if isinstance(parsed, list):
+                for obj in parsed:
+                    if isinstance(obj, dict) and "seg_id" in obj:
+                        fixed_map[obj["seg_id"]] = obj.get("fixed_text") or obj.get("text") or ""
+
+            res_list = []
+            for item in items:
+                sid = item["seg_id"]
+                original = item.get("text_dub") or item.get("text") or ""
+                fixed = fixed_map.get(sid, original)
+                res_list.append({
+                    "seg_id": sid,
+                    "fixed_text": fixed,
+                    "original_text": original,
+                    "is_changed": fixed != original,
+                })
+            return res_list
+        except Exception as e:
+            logger.warning(f"Lỗi khi dịch câu qua Gemini: {e}")
+            return [{
+                "seg_id": item["seg_id"],
+                "fixed_text": item.get("text_dub") or item.get("text") or "",
+                "original_text": item.get("text_dub") or item.get("text") or "",
+                "is_changed": False,
+            } for item in items]
+
