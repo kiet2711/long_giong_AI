@@ -111,6 +111,27 @@ const el = {
   projectsModalBackdrop: document.getElementById('projectsModalBackdrop'),
   projectsList: document.getElementById('projectsList'),
   btnCloseProjectsModal: document.getElementById('btnCloseProjectsModal'),
+
+  // STT Auto Subtitle Recognition
+  btnOpenSttModal: document.getElementById('btnOpenSttModal'),
+  sttModalBackdrop: document.getElementById('sttModalBackdrop'),
+  btnSttModalCloseX: document.getElementById('btnSttModalCloseX'),
+  btnSttModalCancel: document.getElementById('btnSttModalCancel'),
+  sttDropzone: document.getElementById('sttDropzone'),
+  sttFileInput: document.getElementById('sttFileInput'),
+  sttFileName: document.getElementById('sttFileName'),
+  sttDropzoneText: document.getElementById('sttDropzoneText'),
+  sttLangSelect: document.getElementById('sttLangSelect'),
+  sttConcurrencySelect: document.getElementById('sttConcurrencySelect'),
+  sttUseTranslation: document.getElementById('sttUseTranslation'),
+  btnSttStartAction: document.getElementById('btnSttStartAction'),
+  sttProgressContainer: document.getElementById('sttProgressContainer'),
+  sttProgressMessage: document.getElementById('sttProgressMessage'),
+  sttProgressPercent: document.getElementById('sttProgressPercent'),
+  sttProgressBar: document.getElementById('sttProgressBar'),
+  sttResultBox: document.getElementById('sttResultBox'),
+  sttResultSummary: document.getElementById('sttResultSummary'),
+  btnSttApplyToProject: document.getElementById('btnSttApplyToProject'),
 };
 
 // --- Initialization ---
@@ -118,6 +139,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadVoices();
   buildFakeWaveforms();
   setupEventListeners();
+  setupSttEventListeners();
   loadSampleMockData();
   updateOrigVolUI();
   updateDubVolUI();
@@ -1446,3 +1468,240 @@ function loadSampleMockData() {
   renderSubtitleList(state.subtitles);
   updatePlayerUI();
 }
+
+// --- STT (Speech-to-Text) Auto Subtitle Module ---
+let sttSelectedFile = null;
+let currentSttResult = null;
+let sttPollingTimer = null;
+
+function setupSttEventListeners() {
+  if (!el.btnOpenSttModal) return;
+
+  // 1. Open / Close STT Modal
+  el.btnOpenSttModal.addEventListener('click', () => {
+    resetSttModal();
+    el.sttModalBackdrop.style.display = 'flex';
+  });
+
+  const closeSttModal = () => {
+    if (sttPollingTimer) clearInterval(sttPollingTimer);
+    el.sttModalBackdrop.style.display = 'none';
+  };
+
+  if (el.btnSttModalCloseX) el.btnSttModalCloseX.addEventListener('click', closeSttModal);
+  if (el.btnSttModalCancel) el.btnSttModalCancel.addEventListener('click', closeSttModal);
+
+  // 2. File Dropzone
+  if (el.sttDropzone && el.sttFileInput) {
+    el.sttDropzone.addEventListener('click', (e) => {
+      if (e.target !== el.sttFileInput) el.sttFileInput.click();
+    });
+
+    el.sttDropzone.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      el.sttDropzone.classList.add('dragover');
+    });
+
+    el.sttDropzone.addEventListener('dragleave', () => {
+      el.sttDropzone.classList.remove('dragover');
+    });
+
+    el.sttDropzone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      el.sttDropzone.classList.remove('dragover');
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        handleSttFileSelected(e.dataTransfer.files[0]);
+      }
+    });
+
+    el.sttFileInput.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files.length > 0) {
+        handleSttFileSelected(e.target.files[0]);
+      }
+    });
+  }
+
+  // 3. Start STT
+  if (el.btnSttStartAction) {
+    el.btnSttStartAction.addEventListener('click', () => {
+      startSttTranscription();
+    });
+  }
+
+  // 4. Apply STT Result to Project
+  if (el.btnSttApplyToProject) {
+    el.btnSttApplyToProject.addEventListener('click', () => {
+      applySttResultToProject();
+    });
+  }
+}
+
+function handleSttFileSelected(file) {
+  sttSelectedFile = file;
+  if (el.sttFileName) {
+    const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+    el.sttFileName.textContent = `✓ Đã chọn: ${file.name} (${sizeMb} MB)`;
+    el.sttFileName.style.display = 'block';
+  }
+  if (el.sttDropzoneText) {
+    el.sttDropzoneText.textContent = 'Click hoặc kéo thả để đổi file khác';
+  }
+}
+
+function resetSttModal() {
+  sttSelectedFile = null;
+  currentSttResult = null;
+  if (sttPollingTimer) clearInterval(sttPollingTimer);
+
+  if (el.sttFileInput) el.sttFileInput.value = '';
+  if (el.sttFileName) {
+    el.sttFileName.textContent = '';
+    el.sttFileName.style.display = 'none';
+  }
+  if (el.sttDropzoneText) {
+    el.sttDropzoneText.textContent = 'Kéo thả hoặc click để chọn File cần bóc phụ đề';
+  }
+  if (el.sttProgressContainer) el.sttProgressContainer.style.display = 'none';
+  if (el.sttProgressBar) el.sttProgressBar.style.width = '0%';
+  if (el.sttProgressPercent) el.sttProgressPercent.textContent = '0%';
+  if (el.sttResultBox) el.sttResultBox.style.display = 'none';
+  if (el.btnSttStartAction) {
+    el.btnSttStartAction.disabled = false;
+    el.btnSttStartAction.style.display = 'inline-flex';
+  }
+  if (el.btnSttApplyToProject) el.btnSttApplyToProject.style.display = 'none';
+}
+
+async function startSttTranscription() {
+  if (!sttSelectedFile) {
+    alert('Vui lòng chọn file Video hoặc Âm thanh cần nhận dạng.');
+    return;
+  }
+
+  const lang = el.sttLangSelect ? el.sttLangSelect.value : 'vi-VN';
+  const concurrency = el.sttConcurrencySelect ? parseInt(el.sttConcurrencySelect.value, 10) || 3 : 3;
+  const useTrans = el.sttUseTranslation ? el.sttUseTranslation.checked : false;
+
+  el.btnSttStartAction.disabled = true;
+  el.sttProgressContainer.style.display = 'block';
+  el.sttProgressMessage.textContent = 'Đang tải file lên máy chủ...';
+  el.sttProgressPercent.textContent = '5%';
+  el.sttProgressBar.style.width = '5%';
+  el.sttResultBox.style.display = 'none';
+
+  try {
+    const formData = new FormData();
+    formData.append('file', sttSelectedFile);
+    formData.append('language', lang);
+    formData.append('concurrency', String(concurrency));
+    formData.append('use_translation', useTrans ? 'true' : 'false');
+    formData.append('translation_language', 'vi-VN');
+    if (state.currentSessionId) {
+      formData.append('session_id', state.currentSessionId);
+    }
+
+    const res = await fetch('/api/stt/start', {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Lỗi khởi động STT (${res.status}): ${errText}`);
+    }
+
+    const data = await res.json();
+    const taskId = data.task_id;
+
+    // Poll STT status
+    sttPollingTimer = setInterval(async () => {
+      try {
+        const sRes = await fetch(`/api/stt/status/${taskId}`);
+        if (!sRes.ok) return;
+
+        const task = await sRes.json();
+        const pct = Math.round(task.percent || 0);
+
+        el.sttProgressPercent.textContent = `${pct}%`;
+        el.sttProgressBar.style.width = `${pct}%`;
+        el.sttProgressMessage.textContent = task.message || 'Đang xử lý...';
+
+        if (task.status === 'completed') {
+          clearInterval(sttPollingTimer);
+          currentSttResult = task.result;
+
+          el.sttProgressMessage.textContent = 'Bóc phụ đề hoàn tất!';
+          el.sttProgressPercent.textContent = '100%';
+          el.sttProgressBar.style.width = '100%';
+
+          if (el.sttResultBox) {
+            el.sttResultBox.style.display = 'block';
+            if (el.sttResultSummary) {
+              el.sttResultSummary.textContent = `✓ Đã bóc thành công ${task.result.total_sentences} câu phụ đề chuẩn xác!`;
+            }
+          }
+
+          if (el.btnSttApplyToProject) {
+            el.btnSttApplyToProject.style.display = 'inline-flex';
+          }
+          if (el.btnSttStartAction) {
+            el.btnSttStartAction.style.display = 'none';
+          }
+
+        } else if (task.status === 'failed') {
+          clearInterval(sttPollingTimer);
+          el.sttProgressMessage.textContent = `Lỗi: ${task.error || task.message}`;
+          el.btnSttStartAction.disabled = false;
+        }
+      } catch (pollErr) {
+        console.warn('STT poll error:', pollErr);
+      }
+    }, 1500);
+
+  } catch (err) {
+    el.sttProgressMessage.textContent = `Lỗi: ${err.message}`;
+    el.btnSttStartAction.disabled = false;
+    alert(`Không thể bắt đầu STT: ${err.message}`);
+  }
+}
+
+function applySttResultToProject() {
+  if (!currentSttResult) return;
+
+  // 1. Update Subtitles List
+  if (Array.isArray(currentSttResult.subtitles) && currentSttResult.subtitles.length > 0) {
+    state.subtitles = currentSttResult.subtitles;
+    renderSubtitleList(state.subtitles);
+  }
+
+  // 2. Update Dub SRT Info
+  state.srtDubPath = currentSttResult.srt_path;
+  state.currentSessionId = currentSttResult.session_id || state.currentSessionId;
+
+  if (el.srtDubFileName) {
+    el.srtDubFileName.textContent = `✓ ${currentSttResult.srt_filename || 'auto_stt.srt'}`;
+    el.srtDubFileName.style.display = 'block';
+  }
+
+  // 3. Update Video if applicable
+  if (currentSttResult.is_video && currentSttResult.video_url) {
+    state.videoPath = currentSttResult.video_path;
+    if (el.videoFileName) {
+      el.videoFileName.textContent = `✓ ${sttSelectedFile ? sttSelectedFile.name : 'video'}`;
+      el.videoFileName.style.display = 'block';
+    }
+    if (el.mainVideo) {
+      el.mainVideo.src = currentSttResult.video_url;
+      el.mainVideo.style.display = 'block';
+      if (el.videoPlaceholder) el.videoPlaceholder.style.display = 'none';
+    }
+  }
+
+  // 4. Close Modal & Toast
+  el.sttModalBackdrop.style.display = 'none';
+  if (sttPollingTimer) clearInterval(sttPollingTimer);
+
+  appendLog(`[STT] Đã nạp thành công ${currentSttResult.total_sentences} câu phụ đề vào Dự án.`);
+  alert(`Đã áp dụng thành công ${currentSttResult.total_sentences} câu phụ đề vào dự án! Bạn có thể chỉnh sửa câu từ hoặc bấm "Bắt đầu tạo giọng đọc & Render" ngay.`);
+}
+

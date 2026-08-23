@@ -74,6 +74,24 @@
             <div class="file-name" id="srtOrigFileName"></div>
           </div>
         </div>
+
+        <!-- STT Auto Subtitle Recognition Box -->
+        <div style="margin-top: 14px; padding: 12px; border-radius: 8px; background: rgba(59, 130, 246, 0.08); border: 1px dashed rgba(59, 130, 246, 0.4);">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <span style="font-weight: 600; font-size: 13px; color: #60A5FA; display: flex; align-items: center; gap: 6px;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+              Chưa có file SRT? Bóc tự động
+            </span>
+            <span class="badge" style="background: rgba(59, 130, 246, 0.2); color: #93C5FD; font-size: 10px;">⚡ Đa luồng STT</span>
+          </div>
+          <p style="font-size: 11px; color: var(--text-muted); margin-bottom: 10px; line-height: 1.4;">
+            Tự động cắt nhỏ 10 phút & chạy song song bóc trọn bộ phụ đề từ Video hoặc Audio (hỗ trợ file 2-3 tiếng).
+          </p>
+          <button type="button" class="btn btn-teal btn-block" id="btnOpenSttModal" style="font-size: 12px; padding: 8px 12px; justify-content: center; gap: 6px; font-weight: 600;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+            Bóc Phụ Đề STT Tự Động (Video / Audio)
+          </button>
+        </div>
       </div>
 
       <!-- Card 2: Voice & TTS -->
@@ -373,6 +391,100 @@
           Tải Sub SRT
         </button>
         <button class="btn" id="btnModalClose">Đóng Cửa Sổ</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- STT MODAL POPUP -->
+  <div class="modal-backdrop" id="sttModalBackdrop" style="display: none;">
+    <div class="modal" style="max-width: 620px;">
+      <div class="modal-title" style="display: flex; justify-content: space-between; align-items: center;">
+        <span style="display: flex; align-items: center; gap: 8px;">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#60A5FA" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+          Nhận Dạng Giọng Nói & Tự Động Bóc Phụ Đề (STT)
+        </span>
+        <button type="button" class="btn btn-sm" id="btnSttModalCloseX" style="padding: 4px 8px; font-size: 14px; background: transparent; border: none; color: var(--text-muted); cursor: pointer;">✕</button>
+      </div>
+
+      <div style="font-size: 12px; color: var(--text-muted); margin-bottom: 16px; line-height: 1.5;">
+        Hệ thống tự động sử dụng <b>FFmpeg cắt phân đoạn 10 phút</b> và <b>xử lý song song đa luồng</b> qua CapCut Cloud ASR. Hỗ trợ mọi file video/audio dài 2–3 tiếng mà không bị lỗi hay tràn bộ nhớ.
+      </div>
+
+      <div class="form-group">
+        <label>Chọn File Video (.mp4, .mkv, .mov) hoặc Âm thanh (.mp3, .wav, .m4a)</label>
+        <div class="dropzone" id="sttDropzone" style="padding: 20px 14px;">
+          <span id="sttDropzoneText">Kéo thả hoặc click để chọn File cần bóc phụ đề</span>
+          <input type="file" id="sttFileInput" accept="audio/*,video/*">
+          <div class="file-name" id="sttFileName" style="display: none; margin-top: 8px; color: var(--teal); font-weight: 600;"></div>
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 16px;">
+        <div class="form-group" style="margin-bottom: 0;">
+          <label>Ngôn ngữ giọng nói</label>
+          <select id="sttLangSelect" style="width: 100%; padding: 8px 10px; border-radius: 6px; background: var(--surface); border: 1px solid var(--border); color: var(--text);">
+            <option value="vi-VN" selected>🇻🇳 Tiếng Việt</option>
+            <option value="zh-Hans">🇨🇳 Tiếng Trung</option>
+            <option value="en-US">🇺🇸 Tiếng Anh</option>
+            <option value="ja-JP">🇯🇵 Tiếng Nhật</option>
+            <option value="ko-KR">🇰🇷 Tiếng Hàn</option>
+            <option value="th-TH">🇹🇭 Tiếng Thái</option>
+          </select>
+        </div>
+
+        <div class="form-group" style="margin-bottom: 0;">
+          <label>Số luồng chạy song song</label>
+          <select id="sttConcurrencySelect" style="width: 100%; padding: 8px 10px; border-radius: 6px; background: var(--surface); border: 1px solid var(--border); color: var(--text);">
+            <option value="1">1 luồng (Tuần tự)</option>
+            <option value="2">2 luồng</option>
+            <option value="3" selected>3 luồng (Khuyên dùng)</option>
+            <option value="4">4 luồng (Nhanh)</option>
+            <option value="5">5 luồng (Rất nhanh)</option>
+            <option value="8">8 luồng (Siêu tốc)</option>
+            <option value="10">10 luồng (Tối đa)</option>
+          </select>
+        </div>
+
+        <div class="form-group" style="margin-bottom: 0;">
+          <label>Dịch phụ đề</label>
+          <div style="display: flex; align-items: center; gap: 8px; height: 38px;">
+            <input type="checkbox" id="sttUseTranslation" style="width: 16px; height: 16px; cursor: pointer;">
+            <label for="sttUseTranslation" style="margin: 0; font-weight: normal; cursor: pointer; font-size: 13px;">Dịch sang TV</label>
+          </div>
+        </div>
+      </div>
+
+      <!-- STT Progress Box -->
+      <div id="sttProgressContainer" style="display: none; margin-top: 14px; padding: 14px; border-radius: 8px; background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(59, 130, 246, 0.3);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+          <span style="font-size: 12px; font-weight: 600; color: #93C5FD;" id="sttProgressMessage">Đang xử lý...</span>
+          <span style="font-size: 12px; font-weight: 700; color: #60A5FA;" id="sttProgressPercent">0%</span>
+        </div>
+        <div class="progress-bar-container" style="height: 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.1); overflow: hidden;">
+          <div id="sttProgressBar" style="width: 0%; height: 100%; background: linear-gradient(90deg, #3B82F6, #10B981); transition: width 0.3s ease;"></div>
+        </div>
+      </div>
+
+      <!-- STT Result Actions -->
+      <div id="sttResultBox" style="display: none; margin-top: 14px; padding: 12px; border-radius: 8px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3);">
+        <div style="color: var(--teal); font-weight: 600; font-size: 13px; margin-bottom: 4px;" id="sttResultSummary">
+          ✓ Bóc phụ đề thành công!
+        </div>
+        <div style="font-size: 11px; color: var(--text-muted);">
+          Đã tạo file phụ đề SRT hoàn chỉnh với mốc thời gian chính xác từng câu.
+        </div>
+      </div>
+
+      <div class="modal-actions" style="margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end;">
+        <button class="btn" id="btnSttModalCancel">Đóng</button>
+        <button class="btn btn-teal" id="btnSttStartAction" style="font-weight: 600; gap: 6px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+          Bắt Đầu Bóc Phụ Đề
+        </button>
+        <button class="btn btn-primary" id="btnSttApplyToProject" style="display: none; font-weight: 600; gap: 6px;">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>
+          Áp Dụng Vào Dự Án Ngay
+        </button>
       </div>
     </div>
   </div>

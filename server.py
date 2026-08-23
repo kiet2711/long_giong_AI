@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 import uuid
+import webbrowser
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +30,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from core.capcut_stt import ChunkedSTTPipeline
 from core.ffmpeg_engine import FFmpegDubbingEngine, get_video_metadata
 from core.project_manager import ProjectManager
 from core.srt_parser import SRTParser, SubtitleItem, TimelineSegment
@@ -52,6 +54,8 @@ STATIC_DIR.mkdir(exist_ok=True)
 tts_client = CapCutTTSClient(cache_dir=TTS_CACHE_DIR)
 voice_catalog = VoiceCatalog()
 project_manager = ProjectManager(base_dir=BASE_DIR, tts_client=tts_client)
+stt_pipeline = ChunkedSTTPipeline(temp_dir=TEMP_DIR / "stt_pipeline", max_workers=3)
+stt_tasks: Dict[str, Dict[str, Any]] = {}
 
 app = FastAPI(title="AI Dubbing & Video Sync Studio")
 
@@ -71,6 +75,19 @@ jobs_state: Dict[str, Dict[str, Any]] = {}
 active_connections: Dict[str, List[WebSocket]] = {}
 job_locks = threading.Lock()
 MAIN_EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+
+@app.on_event("startup")
+async def on_startup():
+    global MAIN_EVENT_LOOP
+    try:
+        MAIN_EVENT_LOOP = asyncio.get_running_loop()
+    except Exception:
+        pass
+
+    # Auto open browser
+    if os.environ.get("AUTO_OPEN", "true").lower() != "false":
+        threading.Timer(1.2, lambda: webbrowser.open("http://127.0.0.1:8000")).start()
 
 
 def get_job_public_state(raw_job: Dict[str, Any]) -> Dict[str, Any]:
@@ -318,6 +335,144 @@ async def upload_files(
             "missing_count": cache_info.get("missing_count", len(subtitles)),
             "cached_percent": cache_info.get("cached_percent", 0.0),
         },
+    }
+
+
+@app.post("/api/stt/start")
+async def start_stt(
+    file: UploadFile = File(...),
+    language: str = Form("vi-VN"),
+    use_translation: bool = Form(False),
+    translation_language: str = Form("vi-VN"),
+    concurrency: int = Form(3),
+    session_id: Optional[str] = Form(None),
+):
+    """
+    Upload audio or video file and run multi-threaded chunked STT transcription in background.
+    """
+    task_id = uuid.uuid4().hex[:10]
+    effective_session = session_id or uuid.uuid4().hex[:8]
+    session_dir = UPLOADS_DIR / effective_session
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    dest_file = session_dir / file.filename
+    with open(dest_file, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    task_obj = {
+        "task_id": task_id,
+        "session_id": effective_session,
+        "filename": file.filename,
+        "file_path": str(dest_file),
+        "status": "processing",
+        "percent": 5.0,
+        "message": "Đang chuẩn bị file âm thanh/video...",
+        "language": language,
+        "concurrency": concurrency,
+        "result": None,
+        "error": None,
+        "created_at": time.time(),
+    }
+    stt_tasks[task_id] = task_obj
+
+    def _worker():
+        try:
+            def _on_prog(p):
+                task_obj["percent"] = p.get("percent", 50.0)
+                task_obj["message"] = p.get("message", "Đang xử lý...")
+
+            res = stt_pipeline.transcribe_media_file(
+                media_path=dest_file,
+                language=language,
+                translation_language=translation_language,
+                use_translation=use_translation,
+                chunk_duration_sec=600.0,
+                max_workers=concurrency,
+                progress_callback=_on_prog,
+            )
+
+            # Save generated SRT file
+            srt_filename = f"{dest_file.stem}_auto_stt.srt"
+            srt_path = session_dir / srt_filename
+            srt_path.write_text(res["srt_content"], encoding="utf-8")
+
+            # Extract video metadata if it's a video
+            video_meta = None
+            is_video = False
+            try:
+                meta = get_video_metadata(dest_file)
+                if meta.width > 0:
+                    is_video = True
+                    video_meta = {
+                        "duration": meta.duration,
+                        "width": meta.width,
+                        "height": meta.height,
+                        "fps": meta.fps,
+                        "has_audio": meta.has_audio,
+                    }
+            except Exception:
+                pass
+
+            # Update or create project
+            project_manager.create_or_update_project(
+                project_id=effective_session,
+                name=dest_file.stem,
+                video_path=str(dest_file) if is_video else None,
+                srt_dub_path=str(srt_path),
+                srt_orig_path=None,
+                video_meta=video_meta,
+                subtitles=res["subtitles"],
+                status="ready",
+            )
+
+            task_obj["status"] = "completed"
+            task_obj["percent"] = 100.0
+            task_obj["message"] = f"Bóc phụ đề thành công! ({res['total_sentences']} câu)"
+            task_obj["result"] = {
+                "session_id": effective_session,
+                "project_id": effective_session,
+                "srt_path": str(srt_path),
+                "srt_filename": srt_filename,
+                "srt_content": res["srt_content"],
+                "full_text": res["full_text"],
+                "subtitles": res["subtitles"],
+                "total_sentences": res["total_sentences"],
+                "duration_sec": res["duration_sec"],
+                "is_video": is_video,
+                "video_path": str(dest_file) if is_video else None,
+                "video_url": f"/temp/uploads/{effective_session}/{dest_file.name}" if is_video else None,
+            }
+
+        except Exception as err:
+            logger.exception(f"STT worker error: {err}")
+            task_obj["status"] = "failed"
+            task_obj["error"] = str(err)
+            task_obj["message"] = f"Lỗi nhận dạng: {err}"
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+    return {
+        "success": True,
+        "task_id": task_id,
+        "session_id": effective_session,
+        "message": "Đã khởi động tác vụ nhận dạng STT đa luồng",
+    }
+
+
+@app.get("/api/stt/status/{task_id}")
+async def get_stt_status(task_id: str):
+    """Query progress and result of STT task."""
+    task = stt_tasks.get(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="STT task not found")
+
+    return {
+        "task_id": task_id,
+        "status": task["status"],
+        "percent": task["percent"],
+        "message": task["message"],
+        "result": task.get("result"),
+        "error": task.get("error"),
     }
 
 
