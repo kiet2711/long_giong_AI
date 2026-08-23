@@ -12,6 +12,7 @@ const state = {
   subtitles: [],
   voices: [],
   currentJobId: null,
+  currentSessionId: null,
   socket: null,
   isPlaying: false,
   currentTime: 0.0,
@@ -642,6 +643,7 @@ async function selectProject(projectId) {
     state.srtDubPath = data.srt_dub_path;
     state.srtOrigPath = data.srt_orig_path;
     state.subtitles = data.subtitles || [];
+    state.currentSessionId = data.project_id || projectId;
 
     if (data.video_path) {
       el.videoFileName.textContent = data.video_path.split(/[\\/]/).pop();
@@ -706,6 +708,9 @@ async function handleFileSelection() {
   if (vFile) formData.append('video', vFile);
   if (srtDubFile) formData.append('srt_dub', srtDubFile);
   if (srtOrigFile) formData.append('srt_orig', srtOrigFile);
+  if (state.currentSessionId) {
+    formData.append('session_id', state.currentSessionId);
+  }
 
   try {
     const res = await fetch('/api/upload_files', {
@@ -713,6 +718,10 @@ async function handleFileSelection() {
       body: formData,
     });
     const data = await res.json();
+
+    if (data.session_id) {
+      state.currentSessionId = data.session_id;
+    }
 
     if (data.video_path) {
       state.videoPath = data.video_path;
@@ -777,21 +786,34 @@ function getSpeedBadgeInfo(item) {
 
 // --- Render Subtitle List ---
 function renderSubtitleList(subs) {
+  if (!el.srtList) return;
   el.srtList.innerHTML = '';
-  el.srtCountLabel.textContent = `SRT — ${subs.length} DÒNG`;
-
-  if (subs.length > 0) {
-    const first = subs[0];
-    const last = subs[subs.length - 1];
-    el.rangeIndicator.textContent = `${fmtTime(first.start_sec)} – ${fmtTime(last.end_sec)}`;
+  const count = (subs && Array.isArray(subs)) ? subs.length : 0;
+  if (el.srtCountLabel) {
+    el.srtCountLabel.textContent = `SRT — ${count} DÒNG`;
   }
 
-  subs.forEach((item) => {
+  if (subs && subs.length > 0) {
+    const first = subs[0];
+    const last = subs[subs.length - 1];
+    if (el.rangeIndicator) {
+      const fStart = typeof first.start_sec === 'number' ? first.start_sec : (parseFloat(first.start_sec) || 0);
+      const lEnd = typeof last.end_sec === 'number' ? last.end_sec : (parseFloat(last.end_sec) || 0);
+      el.rangeIndicator.textContent = `${fmtTime(fStart)} – ${fmtTime(lEnd)}`;
+    }
+  }
+
+  (subs || []).forEach((item, i) => {
+    const idx = item.index ?? item.id ?? (i + 1);
+    const startSec = typeof item.start_sec === 'number' ? item.start_sec : (parseFloat(item.start_sec) || 0);
+    const endSec = typeof item.end_sec === 'number' ? item.end_sec : (parseFloat(item.end_sec) || startSec);
+    const durSec = typeof item.duration_sec === 'number' ? item.duration_sec : (parseFloat(item.duration_sec) || Math.max(0.1, endSec - startSec));
+
     const div = document.createElement('div');
     div.className = 'srt-line';
-    div.dataset.idx = item.index;
-    div.dataset.start = item.start_sec;
-    div.dataset.end = item.end_sec;
+    div.dataset.idx = idx;
+    div.dataset.start = startSec;
+    div.dataset.end = endSec;
 
     const badgeInfo = getSpeedBadgeInfo(item);
     const cacheTagHtml = item.has_cache 
@@ -799,20 +821,20 @@ function renderSubtitleList(subs) {
       : `<span class="sub-cache-tag missing" title="Chưa tạo âm thanh">⏳ Chưa tạo</span>`;
 
     div.innerHTML = `
-      <div class="srt-idx">${String(item.index).padStart(2, '0')}</div>
+      <div class="srt-idx">${String(idx).padStart(2, '0')}</div>
       <div class="srt-body">
         <div class="srt-time">
-          <span>${fmtTime(item.start_sec)} → ${fmtTime(item.end_sec)} (${item.duration_sec.toFixed(1)}s)</span>
+          <span>${fmtTime(startSec)} → ${fmtTime(endSec)} (${durSec.toFixed(1)}s)</span>
           ${cacheTagHtml}
-          <span class="ratio ${badgeInfo.cls}" id="ratio-badge-${item.index}">${badgeInfo.text}</span>
+          <span class="ratio ${badgeInfo.cls}" id="ratio-badge-${idx}">${badgeInfo.text}</span>
         </div>
-        <div class="srt-text">${escapeHtml(item.text_dub)}</div>
+        <div class="srt-text">${escapeHtml(item.text_dub || '')}</div>
         ${item.text_orig ? `<div class="orig">${escapeHtml(item.text_orig)}</div>` : ''}
       </div>
     `;
 
     div.addEventListener('click', () => {
-      seekToTime(item.start_sec + 0.05);
+      seekToTime(startSec + 0.05);
     });
     el.srtList.appendChild(div);
   });
@@ -820,14 +842,17 @@ function renderSubtitleList(subs) {
 
 // --- Player Logic ---
 function loadVideoIntoPlayer(url) {
-  el.videoPlaceholder.style.display = 'none';
-  el.mainVideo.src = url;
-  el.mainVideo.load();
-  el.mainVideo.onloadedmetadata = () => {
-    state.totalDuration = el.mainVideo.duration || state.totalDuration;
-    el.totalTimeText.textContent = fmtTime(state.totalDuration);
-    updatePlayerUI();
-  };
+  if (el.videoPlaceholder) el.videoPlaceholder.style.display = 'none';
+  if (el.mainVideo) {
+    el.mainVideo.style.display = 'block';
+    el.mainVideo.src = url;
+    el.mainVideo.load();
+    el.mainVideo.onloadedmetadata = () => {
+      state.totalDuration = el.mainVideo.duration || state.totalDuration;
+      if (el.totalTimeText) el.totalTimeText.textContent = fmtTime(state.totalDuration);
+      updatePlayerUI();
+    };
+  }
 }
 
 function togglePlay() {
@@ -1666,42 +1691,76 @@ async function startSttTranscription() {
 }
 
 function applySttResultToProject() {
-  if (!currentSttResult) return;
-
-  // 1. Update Subtitles List
-  if (Array.isArray(currentSttResult.subtitles) && currentSttResult.subtitles.length > 0) {
-    state.subtitles = currentSttResult.subtitles;
-    renderSubtitleList(state.subtitles);
+  if (!currentSttResult) {
+    alert('Không tìm thấy kết quả nhận dạng STT để áp dụng.');
+    return;
   }
 
-  // 2. Update Dub SRT Info
-  state.srtDubPath = currentSttResult.srt_path;
-  state.currentSessionId = currentSttResult.session_id || state.currentSessionId;
-
-  if (el.srtDubFileName) {
-    el.srtDubFileName.textContent = `✓ ${currentSttResult.srt_filename || 'auto_stt.srt'}`;
-    el.srtDubFileName.style.display = 'block';
-  }
-
-  // 3. Update Video if applicable
-  if (currentSttResult.is_video && currentSttResult.video_url) {
-    state.videoPath = currentSttResult.video_path;
-    if (el.videoFileName) {
-      el.videoFileName.textContent = `✓ ${sttSelectedFile ? sttSelectedFile.name : 'video'}`;
-      el.videoFileName.style.display = 'block';
+  try {
+    // 1. Update Subtitles List
+    if (Array.isArray(currentSttResult.subtitles) && currentSttResult.subtitles.length > 0) {
+      state.subtitles = currentSttResult.subtitles.map((s, idx) => {
+        const start = typeof s.start_sec === 'number' ? s.start_sec : (parseFloat(s.start_sec) || 0);
+        const end = typeof s.end_sec === 'number' ? s.end_sec : (parseFloat(s.end_sec) || start);
+        const dur = typeof s.duration_sec === 'number' ? s.duration_sec : (parseFloat(s.duration_sec) || Math.max(0.1, end - start));
+        return {
+          index: s.index ?? s.id ?? (idx + 1),
+          id: s.id ?? (idx + 1),
+          start_sec: start,
+          end_sec: end,
+          duration_sec: dur,
+          text_dub: s.text_dub || '',
+          text_orig: s.text_orig || '',
+          ratio: s.ratio || 1.0,
+          has_cache: s.has_cache || false,
+        };
+      });
+      renderSubtitleList(state.subtitles);
+      checkSubtitlesCache();
     }
-    if (el.mainVideo) {
-      el.mainVideo.src = currentSttResult.video_url;
-      el.mainVideo.style.display = 'block';
-      if (el.videoPlaceholder) el.videoPlaceholder.style.display = 'none';
+
+    // 2. Update Dub SRT Info
+    state.srtDubPath = currentSttResult.srt_path;
+    state.currentJobId = currentSttResult.project_id || currentSttResult.session_id || state.currentJobId;
+    try { localStorage.setItem('active_dubbing_job_id', state.currentJobId); } catch (e) {}
+
+    if (el.srtDubFileName) {
+      el.srtDubFileName.textContent = `✓ ${currentSttResult.srt_filename || 'auto_stt.srt'}`;
+      el.srtDubFileName.style.display = 'block';
     }
+
+    // 3. Update Video if applicable
+    if (currentSttResult.video_path) {
+      state.videoPath = currentSttResult.video_path;
+      state.videoUrl = currentSttResult.video_url;
+      if (el.videoFileName) {
+        const displayName = sttSelectedFile ? sttSelectedFile.name : currentSttResult.video_path.split(/[\\/]/).pop();
+        el.videoFileName.textContent = `✓ ${displayName}`;
+        el.videoFileName.style.display = 'block';
+      }
+      if (currentSttResult.video_url) {
+        loadVideoIntoPlayer(currentSttResult.video_url);
+      }
+    }
+
+    if (currentSttResult.duration_sec) {
+      state.totalDuration = currentSttResult.duration_sec;
+      if (el.totalTimeText) el.totalTimeText.textContent = fmtTime(state.totalDuration);
+      updatePlayerUI();
+    }
+
+    // 4. Close Modal & Toast
+    if (el.sttModalBackdrop) {
+      el.sttModalBackdrop.classList.remove('show');
+      el.sttModalBackdrop.style.display = 'none';
+    }
+    if (sttPollingTimer) clearInterval(sttPollingTimer);
+
+    appendLog(`[STT] Đã nạp thành công ${currentSttResult.total_sentences} câu phụ đề vào Dự án.`);
+    alert(`Đã áp dụng thành công ${currentSttResult.total_sentences} câu phụ đề vào dự án!\nBạn có thể chỉnh sửa câu từ hoặc bấm "Bắt đầu Lồng tiếng & Render" ngay.`);
+  } catch (err) {
+    console.error('Error applying STT result:', err);
+    alert(`Lỗi khi áp dụng phụ đề vào dự án: ${err.message}`);
   }
-
-  // 4. Close Modal & Toast
-  el.sttModalBackdrop.style.display = 'none';
-  if (sttPollingTimer) clearInterval(sttPollingTimer);
-
-  appendLog(`[STT] Đã nạp thành công ${currentSttResult.total_sentences} câu phụ đề vào Dự án.`);
-  alert(`Đã áp dụng thành công ${currentSttResult.total_sentences} câu phụ đề vào dự án! Bạn có thể chỉnh sửa câu từ hoặc bấm "Bắt đầu tạo giọng đọc & Render" ngay.`);
 }
 

@@ -257,10 +257,11 @@ async def upload_files(
     video: Optional[UploadFile] = File(None),
     srt_dub: Optional[UploadFile] = File(None),
     srt_orig: Optional[UploadFile] = File(None),
+    session_id: Optional[str] = Form(None),
 ):
     """Upload video and subtitle files and automatically index/detect cache."""
-    session_id = uuid.uuid4().hex[:8]
-    session_dir = UPLOADS_DIR / session_id
+    effective_session = session_id or uuid.uuid4().hex[:8]
+    session_dir = UPLOADS_DIR / effective_session
     session_dir.mkdir(parents=True, exist_ok=True)
 
     video_path = None
@@ -305,10 +306,10 @@ async def upload_files(
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Failed to parse SRT: {e}")
 
-    # Create persistent project entry
-    if video_path or srt_dub_path:
+    # Create persistent project entry ONLY when valid subtitles exist or are uploaded
+    if (subtitles and len(subtitles) > 0) or srt_dub_path:
         project_manager.create_or_update_project(
-            project_id=session_id,
+            project_id=effective_session,
             name=Path(video_path).stem if video_path else "Dự án mới",
             video_path=video_path,
             srt_dub_path=srt_dub_path,
@@ -322,10 +323,10 @@ async def upload_files(
     cache_info = project_manager.check_subtitles_cache(subtitles, "BV421_vivn_streaming", "1.0")
 
     return {
-        "session_id": session_id,
-        "project_id": session_id,
+        "session_id": effective_session,
+        "project_id": effective_session,
         "video_path": video_path,
-        "video_url": f"/temp/uploads/{session_id}/{Path(video_path).name}" if video_path else None,
+        "video_url": f"/temp/uploads/{effective_session}/{Path(video_path).name}" if video_path else None,
         "video_meta": video_meta,
         "srt_dub_path": srt_dub_path,
         "srt_orig_path": srt_orig_path,
@@ -398,7 +399,8 @@ async def start_stt(
 
             # Extract video metadata if it's a video
             video_meta = None
-            is_video = False
+            video_exts = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".ts", ".flv", ".wmv", ".m4v"}
+            is_video = dest_file.suffix.lower() in video_exts
             try:
                 meta = get_video_metadata(dest_file)
                 if meta.width > 0:

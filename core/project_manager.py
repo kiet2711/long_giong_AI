@@ -182,13 +182,22 @@ class ProjectManager:
                         voice = p_data.get("voice", "BV421_vivn_streaming")
                         rate = p_data.get("voice_rate", "1.0")
 
+                        total_subs = len(subtitles)
+
+                        # Filter out and auto-clean empty dummy projects (0 subtitles and no output)
+                        if total_subs == 0 and not p_data.get("output_path") and not p_data.get("srt_dub_path"):
+                            try:
+                                shutil.rmtree(p_dir, ignore_errors=True)
+                            except Exception:
+                                pass
+                            continue
+
                         cached_count = 0
                         for s in subtitles:
                             text = s.get("text_dub", "")
                             if text and self.tts_client.get_cached_audio_path(text, voice, rate):
                                 cached_count += 1
 
-                        total_subs = len(subtitles)
                         pct = round((cached_count / max(1, total_subs)) * 100.0, 1)
 
                         p_data["total_segments"] = total_subs

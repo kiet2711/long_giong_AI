@@ -716,10 +716,13 @@ class ChunkedSTTPipeline:
                     start_fmt = ms_to_srt_time(start_ms)
                     end_fmt = ms_to_srt_time(end_ms)
 
+                    dur_sec = max(0.1, round(end_sec - start_sec, 3))
                     sub_item = {
                         "id": global_id,
+                        "index": global_id,
                         "start_sec": round(start_sec, 3),
                         "end_sec": round(end_sec, 3),
+                        "duration_sec": dur_sec,
                         "start_time_str": start_fmt,
                         "end_time_str": end_fmt,
                         "text_dub": text,
