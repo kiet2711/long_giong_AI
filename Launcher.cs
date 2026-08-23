@@ -95,6 +95,12 @@ namespace DubbingStudioLauncher
             else
                 psi.EnvironmentVariables.Add("PYTHONUTF8", "1");
 
+            // Disable AUTO_OPEN in server.py since Launcher manages browser opening
+            if (psi.EnvironmentVariables.ContainsKey("AUTO_OPEN"))
+                psi.EnvironmentVariables["AUTO_OPEN"] = "false";
+            else
+                psi.EnvironmentVariables.Add("AUTO_OPEN", "false");
+
             try
             {
                 _pythonProcess = Process.Start(psi);

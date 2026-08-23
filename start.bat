@@ -6,8 +6,6 @@ echo   AI Dubbing & Video Sync Studio (FFmpeg Native)
 echo   Starting server at http://127.0.0.1:8000
 echo ========================================================
 
-:: Tu dong mo trinh duyet
-start http://127.0.0.1:8000
-
+:: Backend server (server.py) se tu dong mo trinh duyet khi khoi dong
 python -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 pause
