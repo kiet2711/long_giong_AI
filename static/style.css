@@ -682,10 +682,12 @@ video#mainVideo {
   background: rgba(255, 138, 61, 0.16);
   color: var(--amber);
 }
-.ratio.bad {
+.ratio.bad, .ratio.danger {
   background: rgba(255, 93, 93, 0.16);
   color: var(--red);
+  border: 1px solid rgba(255, 93, 93, 0.3);
 }
+
 .srt-text {
   font-size: 13px;
   line-height: 1.4;

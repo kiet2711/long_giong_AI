@@ -484,10 +484,13 @@ class StartDubbingRequest(BaseModel):
     srt_orig_path: Optional[str] = None
     voice: Optional[str] = "BV421_vivn_streaming"
     voice_rate: Optional[str] = "1.0"
-    min_audio_speed: Optional[float] = 0.80
-    max_audio_speed: Optional[float] = 1.20
-    min_video_speed: Optional[float] = 0.50
-    max_video_speed: Optional[float] = 1.50
+    min_audio_speed: Optional[float] = 0.85
+    max_audio_speed: Optional[float] = 1.35
+    max_gap_borrow: Optional[float] = 0.80
+    safety_gap_buffer: Optional[float] = 0.15
+    use_adaptive_prosody: Optional[bool] = True
+    min_video_speed: Optional[float] = 1.0
+    max_video_speed: Optional[float] = 1.0
     min_ratio: Optional[float] = None
     max_ratio: Optional[float] = None
     orig_volume: Optional[float] = 0.15
@@ -537,16 +540,16 @@ async def start_dubbing(req: StartDubbingRequest):
         try:
             engine = FFmpegDubbingEngine(
                 tts_client=tts_client,
-                min_audio_speed=req.min_audio_speed if req.min_audio_speed is not None else 0.80,
-                max_audio_speed=req.max_audio_speed if req.max_audio_speed is not None else 1.20,
-                min_video_speed=req.min_video_speed if req.min_video_speed is not None else 0.50,
-                max_video_speed=req.max_video_speed if req.max_video_speed is not None else 1.50,
-                min_ratio=req.min_ratio,
-                max_ratio=req.max_ratio,
+                min_audio_speed=req.min_audio_speed if req.min_audio_speed is not None else 0.85,
+                max_audio_speed=req.max_audio_speed if req.max_audio_speed is not None else 1.35,
+                max_gap_borrow=req.max_gap_borrow if req.max_gap_borrow is not None else 0.80,
+                safety_gap_buffer=req.safety_gap_buffer if req.safety_gap_buffer is not None else 0.15,
+                use_adaptive_prosody=req.use_adaptive_prosody if req.use_adaptive_prosody is not None else True,
                 orig_volume=req.orig_volume if req.orig_volume is not None else 0.15,
                 dub_volume=req.dub_volume if req.dub_volume is not None else 1.20,
                 num_workers=req.num_workers if req.num_workers is not None else 50,
             )
+
 
             def on_progress(payload: Dict[str, Any]):
                 with job_locks:
@@ -858,14 +861,16 @@ async def resume_dubbing_render(req: ResumeRenderRequest):
     if not engine:
         engine = FFmpegDubbingEngine(
             tts_client=tts_client,
-            min_audio_speed=getattr(req_obj, "min_audio_speed", 0.80) if req_obj else 0.80,
-            max_audio_speed=getattr(req_obj, "max_audio_speed", 1.20) if req_obj else 1.20,
-            min_video_speed=getattr(req_obj, "min_video_speed", 0.50) if req_obj else 0.50,
-            max_video_speed=getattr(req_obj, "max_video_speed", 1.50) if req_obj else 1.50,
+            min_audio_speed=getattr(req_obj, "min_audio_speed", 0.85) if req_obj else 0.85,
+            max_audio_speed=getattr(req_obj, "max_audio_speed", 1.35) if req_obj else 1.35,
+            max_gap_borrow=getattr(req_obj, "max_gap_borrow", 0.80) if req_obj else 0.80,
+            safety_gap_buffer=getattr(req_obj, "safety_gap_buffer", 0.15) if req_obj else 0.15,
+            use_adaptive_prosody=getattr(req_obj, "use_adaptive_prosody", True) if req_obj else True,
             orig_volume=getattr(req_obj, "orig_volume", 0.15) if req_obj else 0.15,
             dub_volume=getattr(req_obj, "dub_volume", 1.20) if req_obj else 1.20,
             num_workers=getattr(req_obj, "num_workers", 50) if req_obj else 50,
         )
+
         with job_locks:
             jobs_state[req.job_id]["engine"] = engine
 

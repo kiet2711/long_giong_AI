@@ -38,10 +38,9 @@ const el = {
   audioRangeHighlight: document.getElementById('audioRangeHighlight'),
   minAudioSpeedSlider: document.getElementById('minAudioSpeedSlider'),
   maxAudioSpeedSlider: document.getElementById('maxAudioSpeedSlider'),
-  videoSpeedRangeBadge: document.getElementById('videoSpeedRangeBadge'),
-  videoRangeHighlight: document.getElementById('videoRangeHighlight'),
-  minVideoSpeedSlider: document.getElementById('minVideoSpeedSlider'),
-  maxVideoSpeedSlider: document.getElementById('maxVideoSpeedSlider'),
+  gapBorrowSlider: document.getElementById('gapBorrowSlider'),
+  gapBorrowBadge: document.getElementById('gapBorrowBadge'),
+  useAdaptiveProsodyCheckbox: document.getElementById('useAdaptiveProsodyCheckbox'),
   origVolSlider: document.getElementById('origVolSlider'),
   origVolBadge: document.getElementById('origVolBadge'),
   dubVolSlider: document.getElementById('dubVolSlider'),
@@ -49,6 +48,7 @@ const el = {
   threadsSlider: document.getElementById('threadsSlider'),
   threadsValue: document.getElementById('threadsValue'),
   btnStartDubbing: document.getElementById('btnStartDubbing'),
+
 
   // Video Player
   mainVideo: document.getElementById('mainVideo'),
@@ -145,23 +145,23 @@ document.addEventListener('DOMContentLoaded', () => {
   updateOrigVolUI();
   updateDubVolUI();
   updateSpeedLimitsUI();
+  updateGapBorrowUI();
   updateCacheStatsBadge();
   checkAndRestoreActiveJob();
 });
 
 function updateSpeedLimitsUI() {
-  // 1. Audio Speed Range
+  // Audio Speed Range (0.70 to 1.80, total span = 1.10)
   if (el.minAudioSpeedSlider && el.maxAudioSpeedSlider) {
-    let minA = parseFloat(el.minAudioSpeedSlider.value) || 0.80;
-    let maxA = parseFloat(el.maxAudioSpeedSlider.value) || 1.20;
+    let minA = parseFloat(el.minAudioSpeedSlider.value) || 0.85;
+    let maxA = parseFloat(el.maxAudioSpeedSlider.value) || 1.35;
     if (minA > maxA) {
       minA = maxA;
       el.minAudioSpeedSlider.value = minA;
     }
 
-    // Audio range is 0.50 to 2.00 (total span = 1.50)
-    const leftPct = ((minA - 0.50) / 1.50) * 100;
-    const rightPct = ((maxA - 0.50) / 1.50) * 100;
+    const leftPct = ((minA - 0.70) / 1.10) * 100;
+    const rightPct = ((maxA - 0.70) / 1.10) * 100;
     if (el.audioRangeHighlight) {
       el.audioRangeHighlight.style.left = `${leftPct}%`;
       el.audioRangeHighlight.style.width = `${Math.max(2, rightPct - leftPct)}%`;
@@ -177,35 +177,18 @@ function updateSpeedLimitsUI() {
       }
     }
   }
+}
 
-  // 2. Video Speed Range
-  if (el.minVideoSpeedSlider && el.maxVideoSpeedSlider) {
-    let minV = parseFloat(el.minVideoSpeedSlider.value) || 0.50;
-    let maxV = parseFloat(el.maxVideoSpeedSlider.value) || 1.50;
-    if (minV > maxV) {
-      minV = maxV;
-      el.minVideoSpeedSlider.value = minV;
-    }
-
-    // Video range is 0.30 to 2.00 (total span = 1.70)
-    const leftPct = ((minV - 0.30) / 1.70) * 100;
-    const rightPct = ((maxV - 0.30) / 1.70) * 100;
-    if (el.videoRangeHighlight) {
-      el.videoRangeHighlight.style.left = `${leftPct}%`;
-      el.videoRangeHighlight.style.width = `${Math.max(2, rightPct - leftPct)}%`;
-    }
-
-    if (el.videoSpeedRangeBadge) {
-      if (Math.abs(minV - 1.0) < 0.01 && Math.abs(maxV - 1.0) < 0.01) {
-        el.videoSpeedRangeBadge.textContent = '1.00x (Khóa 1.0x - 0s Encode)';
-      } else if (Math.abs(minV - maxV) < 0.01) {
-        el.videoSpeedRangeBadge.textContent = `${minV.toFixed(2)}x (Cố định)`;
-      } else {
-        el.videoSpeedRangeBadge.textContent = `${minV.toFixed(2)}x ⟷ ${maxV.toFixed(2)}x`;
-      }
-    }
+function updateGapBorrowUI() {
+  if (!el.gapBorrowSlider || !el.gapBorrowBadge) return;
+  const val = parseFloat(el.gapBorrowSlider.value) || 0.0;
+  if (val <= 0.01) {
+    el.gapBorrowBadge.textContent = '0.00s (Tắt mượn)';
+  } else {
+    el.gapBorrowBadge.textContent = `${val.toFixed(2)}s (Chống méo tiếng)`;
   }
 }
+
 
 function updateOrigVolUI() {
   if (!el.origVolSlider || !el.origVolBadge) return;
@@ -323,20 +306,11 @@ function setupEventListeners() {
     });
   }
 
-  // Dual Range Slider 2: Video Speed
-  if (el.minVideoSpeedSlider && el.maxVideoSpeedSlider) {
-    el.minVideoSpeedSlider.addEventListener('input', () => {
-      const minV = parseFloat(el.minVideoSpeedSlider.value);
-      const maxV = parseFloat(el.maxVideoSpeedSlider.value);
-      if (minV > maxV) el.maxVideoSpeedSlider.value = minV;
-      updateSpeedLimitsUI();
-    });
-
-    el.maxVideoSpeedSlider.addEventListener('input', () => {
-      const minV = parseFloat(el.minVideoSpeedSlider.value);
-      const maxV = parseFloat(el.maxVideoSpeedSlider.value);
-      if (maxV < minV) el.minVideoSpeedSlider.value = maxV;
-      updateSpeedLimitsUI();
+  // Gap Borrowing Slider
+  if (el.gapBorrowSlider) {
+    el.gapBorrowSlider.addEventListener('input', () => {
+      updateGapBorrowUI();
+      if (state.subtitles.length > 0) renderSubtitleList(state.subtitles);
     });
   }
 
@@ -355,17 +329,20 @@ function setupEventListeners() {
         el.maxAudioSpeedSlider.value = btn.dataset.max;
         updateSpeedLimitsUI();
         if (state.subtitles.length > 0) renderSubtitleList(state.subtitles);
-      } else if (target === 'videorange' && el.minVideoSpeedSlider && el.maxVideoSpeedSlider) {
-        el.minVideoSpeedSlider.value = btn.dataset.min;
-        el.maxVideoSpeedSlider.value = btn.dataset.max;
-        updateSpeedLimitsUI();
+      } else if (target === 'gapborrow' && el.gapBorrowSlider) {
+        el.gapBorrowSlider.value = btn.dataset.val;
+        updateGapBorrowUI();
+        if (state.subtitles.length > 0) renderSubtitleList(state.subtitles);
       }
     });
   });
 
-  el.threadsSlider.addEventListener('input', () => {
-    el.threadsValue.textContent = `${el.threadsSlider.value} luồng`;
-  });
+  if (el.threadsSlider) {
+    el.threadsSlider.addEventListener('input', () => {
+      el.threadsValue.textContent = `${el.threadsSlider.value} luồng`;
+    });
+  }
+
 
   // Cleanup Cache Button
   const btnCleanup = document.getElementById('btnCleanup');
@@ -748,41 +725,52 @@ async function handleFileSelection() {
 }
 
 function getSpeedBadgeInfo(item) {
-  const ratio = item.ratio || 1.0;
-  const minAudioSpeed = el.minAudioSpeedSlider ? parseFloat(el.minAudioSpeedSlider.value) || 0.80 : 0.80;
-  const maxAudioSpeed = el.maxAudioSpeedSlider ? parseFloat(el.maxAudioSpeedSlider.value) || 1.20 : 1.20;
-  const maxVideoSpeed = el.maxVideoSpeedSlider ? parseFloat(el.maxVideoSpeedSlider.value) || 1.50 : 1.50;
-
   if (item.sync_desc) {
     let cls = 'ok';
-    if (item.sync_mode === 'rubberband') cls = 'ok';
-    else if (item.sync_mode === 'setpts') cls = 'warn';
+    if (item.speed_warning_level === 'critical' || item.sync_mode === 'setpts') cls = 'danger';
+    else if (item.speed_warning_level === 'warning') cls = 'warn';
     return { text: item.sync_desc, cls };
   }
+
+  const ratio = item.ratio || 1.0;
+  const minAudioSpeed = el.minAudioSpeedSlider ? parseFloat(el.minAudioSpeedSlider.value) || 0.85 : 0.85;
+  const maxAudioSpeed = el.maxAudioSpeedSlider ? parseFloat(el.maxAudioSpeedSlider.value) || 1.35 : 1.35;
+  const gapBorrow = el.gapBorrowSlider ? parseFloat(el.gapBorrowSlider.value) || 0.80 : 0.80;
 
   if (Math.abs(ratio - 1.0) < 0.05) {
     return { text: 'Chuẩn 1.0x (Khớp)', cls: 'ok' };
   }
 
   if (ratio > 1.0) {
-    // Audio is shorter than video duration -> ratio = Dv / Da > 1.0
+    // Audio is shorter than segment duration -> ratio = Dv / Da > 1.0
     const reqAudioSpeed = 1.0 / ratio;
     if (reqAudioSpeed >= minAudioSpeed && minAudioSpeed < 0.99) {
       return { text: `Giảm giọng ${reqAudioSpeed.toFixed(2)}x`, cls: 'ok' };
     } else {
-      const vSpeed = Math.min(maxVideoSpeed, ratio);
-      return { text: `Tăng video ${vSpeed.toFixed(2)}x`, cls: 'warn' };
+      return { text: 'Chuẩn 1.0x (Đệm khoảng lặng)', cls: 'ok' };
     }
   } else {
-    // Audio is longer than video duration -> ratio = Dv / Da < 1.0
-    const reqAudioSpeed = 1.0 / Math.max(0.1, ratio);
-    if (reqAudioSpeed <= maxAudioSpeed) {
-      return { text: `Tăng giọng ${reqAudioSpeed.toFixed(2)}x`, cls: 'ok' };
+    // Audio is longer than segment duration -> ratio = Dv / Da < 1.0
+    const dur = typeof item.duration_sec === 'number' ? item.duration_sec : 2.0;
+    const nextGap = item.next_gap_sec || 0.0;
+    const usableGap = Math.min(gapBorrow, Math.max(0, nextGap - 0.15));
+    const effectiveDur = dur + usableGap;
+    const audDur = item.audio_duration_sec || (dur / Math.max(0.1, ratio));
+    const reqAudioSpeed = audDur / Math.max(0.1, effectiveDur);
+
+    if (reqAudioSpeed <= 1.05 && usableGap > 0) {
+      return { text: `Chuẩn 1.0x (Mượn ${usableGap.toFixed(2)}s Gap)`, cls: 'ok' };
+    } else if (reqAudioSpeed <= maxAudioSpeed) {
+      const gapNote = usableGap > 0 ? ` + Mượn ${usableGap.toFixed(1)}s` : '';
+      const cls = reqAudioSpeed <= 1.20 ? 'ok' : 'warn';
+      return { text: `Tăng ${reqAudioSpeed.toFixed(2)}x${gapNote}`, cls };
     } else {
-      return { text: `Chậm video ${ratio.toFixed(2)}x`, cls: 'warn' };
+      const gapNote = usableGap > 0 ? ` + Mượn ${usableGap.toFixed(1)}s` : '';
+      return { text: `⚠️ Quá dài (${reqAudioSpeed.toFixed(2)}x)${gapNote}`, cls: 'danger' };
     }
   }
 }
+
 
 // --- Render Subtitle List ---
 function renderSubtitleList(subs) {
@@ -950,14 +938,15 @@ async function startDubbingProcess() {
     srt_orig_path: state.srtOrigPath,
     voice: el.voiceSelect.value,
     voice_rate: el.voiceRateSelect.value,
-    min_audio_speed: el.minAudioSpeedSlider ? parseFloat(el.minAudioSpeedSlider.value) : 0.80,
-    max_audio_speed: el.maxAudioSpeedSlider ? parseFloat(el.maxAudioSpeedSlider.value) : 1.20,
-    min_video_speed: el.minVideoSpeedSlider ? parseFloat(el.minVideoSpeedSlider.value) : 0.50,
-    max_video_speed: el.maxVideoSpeedSlider ? parseFloat(el.maxVideoSpeedSlider.value) : 1.50,
+    min_audio_speed: el.minAudioSpeedSlider ? parseFloat(el.minAudioSpeedSlider.value) : 0.85,
+    max_audio_speed: el.maxAudioSpeedSlider ? parseFloat(el.maxAudioSpeedSlider.value) : 1.35,
+    max_gap_borrow: el.gapBorrowSlider ? parseFloat(el.gapBorrowSlider.value) : 0.80,
+    use_adaptive_prosody: el.useAdaptiveProsodyCheckbox ? el.useAdaptiveProsodyCheckbox.checked : true,
     orig_volume: origVolVal,
     dub_volume: dubVolVal,
     num_workers: parseInt(el.threadsSlider.value, 10) || 50,
   };
+
 
   el.btnStartDubbing.disabled = true;
   el.modalBackdrop.classList.add('show');
@@ -1375,16 +1364,15 @@ async function resumeDubbingRender() {
 
 // --- Convert Final Timeline to Subtitles List with Synchronized Timecodes ---
 function updateSubtitlesFromTimeline(timeline) {
-  let curTime = 0.0;
   const newSubs = [];
   let idx = 1;
 
   timeline.forEach((seg) => {
     if (seg.seg_type === 'dub') {
-      const vSpeed = seg.video_speed_applied || 1.0;
-      const segDur = seg.duration_sec / Math.max(0.1, vSpeed);
-      const startT = curTime;
-      const endT = curTime + segDur;
+      const borrowed = seg.borrowed_gap_sec || 0.0;
+      const startT = seg.start_sec;
+      const endT = seg.start_sec + seg.duration_sec + borrowed;
+      const segDur = seg.duration_sec + borrowed;
 
       newSubs.push({
         index: idx++,
@@ -1396,13 +1384,11 @@ function updateSubtitlesFromTimeline(timeline) {
         ratio: seg.ratio,
         sync_mode: seg.sync_mode,
         speed_applied: seg.speed_applied,
-        video_speed_applied: seg.video_speed_applied,
+        video_speed_applied: 1.0,
+        borrowed_gap_sec: borrowed,
+        speed_warning_level: seg.speed_warning_level || 'normal',
         sync_desc: seg.sync_desc,
       });
-
-      curTime += segDur;
-    } else {
-      curTime += seg.duration_sec;
     }
   });
 
@@ -1411,6 +1397,7 @@ function updateSubtitlesFromTimeline(timeline) {
     renderSubtitleList(state.subtitles);
   }
 }
+
 
 // --- Restore active job on page refresh / reopen ---
 function checkAndRestoreActiveJob() {

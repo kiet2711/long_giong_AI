@@ -141,6 +141,38 @@ class CapCutTTSClient:
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
 
+    @staticmethod
+    def estimate_prosody_rate(text: str, target_dur_sec: float, base_rate: str = "1.0") -> str:
+        """
+        Estimate the most natural CapCut SSML prosody rate to generate speech
+        that naturally fits the allocated duration without requiring excessive DSP time-stretching.
+        """
+        words = text.strip().split()
+        if not words or target_dur_sec <= 0.1:
+            return base_rate
+
+        # In Vietnamese, ~4.0 - 4.3 words/syllables per second is standard 1.0x pace
+        est_natural_dur = max(0.5, len(words) / 4.2)
+        ratio = est_natural_dur / max(0.2, target_dur_sec)
+
+        try:
+            b_val = float(base_rate)
+        except Exception:
+            b_val = 1.0
+
+        if ratio >= 1.35:
+            suggested = min(1.4, b_val * 1.3)
+        elif ratio >= 1.20:
+            suggested = min(1.3, b_val * 1.2)
+        elif ratio >= 1.08:
+            suggested = min(1.2, b_val * 1.1)
+        elif ratio <= 0.70 and target_dur_sec >= 2.0:
+            suggested = max(0.9, b_val * 0.9)
+        else:
+            suggested = b_val
+
+        return f"{round(suggested, 1):.1f}"
+
     def compute_cache_key(self, text: str, voice: Optional[str] = "BV421_vivn_streaming", rate: str = "1.0") -> str:
         """Generate deterministic cache key for (voice, rate, normalized_text)."""
         voice_str = (voice or "BV421_vivn_streaming").strip().lower()

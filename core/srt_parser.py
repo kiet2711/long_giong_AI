@@ -76,9 +76,9 @@ class SubtitleItem:
 @dataclass
 class TimelineSegment:
     """
-    Timeline block for video processing:
+    Timeline block for audio/video processing:
     - 'dub': Subtitle line that requires AI voiceover.
-    - 'gap': Silence or non-speech interval to be cut from original video as-is.
+    - 'gap': Silence or non-speech interval in original video.
     """
     seg_id: int
     seg_type: str  # 'dub' or 'gap'
@@ -90,9 +90,13 @@ class TimelineSegment:
     audio_path: Optional[str] = None
     audio_duration_sec: Optional[float] = None
     ratio: Optional[float] = None  # duration_sec / audio_duration_sec
-    sync_mode: Optional[str] = None  # 'rubberband', 'setpts', 'passthrough'
+    sync_mode: Optional[str] = None  # 'rubberband', 'atempo', 'passthrough'
     speed_applied: Optional[float] = 1.0
-    video_speed_applied: Optional[float] = 1.0
+    video_speed_applied: Optional[float] = 1.0  # Kept at 1.0 (video untouched)
+    next_gap_sec: float = 0.0  # Available silence gap following this segment
+    borrowed_gap_sec: float = 0.0  # Amount of gap duration borrowed by voice
+    prosody_rate_applied: str = "1.0"  # Native SSML prosody rate
+    speed_warning_level: str = "normal"  # 'normal', 'warning', 'critical'
     sync_desc: Optional[str] = ""
     output_segment_path: Optional[str] = None
     tts_error: Optional[str] = None
@@ -100,6 +104,7 @@ class TimelineSegment:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
 
 
 class SRTParser:
@@ -194,7 +199,8 @@ class SRTParser:
         min_gap_sec: float = 0.05,
     ) -> List[TimelineSegment]:
         """
-        Build continuous timeline segments interleaving dubbed subtitle segments with gap intervals.
+        Build continuous timeline segments interleaving dubbed subtitle segments with gap intervals,
+        and calculate available next silence gaps for intelligent gap borrowing.
         """
         segments: List[TimelineSegment] = []
         current_time = 0.0
@@ -249,6 +255,14 @@ class SRTParser:
                 )
             )
 
+        # Compute next_gap_sec for each dub segment to enable Smart Gap Borrowing
+        for i, seg in enumerate(segments):
+            if seg.seg_type == "dub":
+                if i + 1 < len(segments) and segments[i + 1].seg_type == "gap":
+                    seg.next_gap_sec = round(segments[i + 1].duration_sec, 3)
+                else:
+                    seg.next_gap_sec = 0.0
+
         return segments
 
     @classmethod
@@ -257,18 +271,17 @@ class SRTParser:
         timeline_segs: List[TimelineSegment],
         output_srt_path: Union[str, Path],
     ) -> Path:
-        """Export newly shifted & aligned SRT file corresponding to the final video timeline."""
+        """Export SRT file aligned with actual voiceover timing on the original video timeline."""
         out_path = Path(output_srt_path)
         lines = []
         sub_index = 1
-        current_out_time = 0.0
 
         for seg in timeline_segs:
             if seg.seg_type == "dub":
-                v_speed = seg.video_speed_applied or 1.0
-                seg_out_duration = seg.duration_sec / max(0.1, v_speed)
-                start_t = current_out_time
-                end_t = current_out_time + seg_out_duration
+                start_t = seg.start_sec
+                # If voice borrowed gap, adjust end time accordingly
+                borrowed = seg.borrowed_gap_sec or 0.0
+                end_t = round(seg.start_sec + seg.duration_sec + borrowed, 3)
 
                 lines.append(f"{sub_index}")
                 lines.append(f"{format_srt_timestamp(start_t)} --> {format_srt_timestamp(end_t)}")
@@ -276,10 +289,7 @@ class SRTParser:
                 lines.append("")
 
                 sub_index += 1
-                current_out_time += seg_out_duration
-            else:
-                # Gap segment duration in final video
-                current_out_time += seg.duration_sec
 
         out_path.write_text("\n".join(lines), encoding="utf-8")
         return out_path
+

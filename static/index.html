@@ -171,50 +171,63 @@
         <div class="slider-group" style="margin-top: 8px;">
           <div class="slider-header">
             <label>Dải Tốc độ Giọng đọc AI (Tối thiểu ⟷ Tối đa)</label>
-            <span id="audioSpeedRangeBadge" class="slider-badge badge-amber">0.80x ⟷ 1.20x</span>
+            <span id="audioSpeedRangeBadge" class="slider-badge badge-amber">0.85x ⟷ 1.35x</span>
           </div>
           <div class="dual-range-wrapper">
             <div class="dual-range-track"></div>
             <div class="dual-range-highlight" id="audioRangeHighlight"></div>
-            <input type="range" id="minAudioSpeedSlider" class="dual-range-thumb" min="0.50" max="2.00" value="0.80" step="0.05">
-            <input type="range" id="maxAudioSpeedSlider" class="dual-range-thumb" min="0.50" max="2.00" value="1.20" step="0.05">
+            <input type="range" id="minAudioSpeedSlider" class="dual-range-thumb" min="0.70" max="1.80" value="0.85" step="0.05">
+            <input type="range" id="maxAudioSpeedSlider" class="dual-range-thumb" min="0.70" max="1.80" value="1.35" step="0.05">
           </div>
           <div class="quick-presets">
-            <button type="button" class="preset-btn" data-target="audiorange" data-min="0.80" data-max="1.20">0.80x – 1.20x (Chuẩn)</button>
-            <button type="button" class="preset-btn" data-target="audiorange" data-min="1.00" data-max="1.00">1.00x (Khóa cố định)</button>
-            <button type="button" class="preset-btn" data-target="audiorange" data-min="0.75" data-max="1.25">0.75x – 1.25x (Linh hoạt)</button>
+            <button type="button" class="preset-btn" data-target="audiorange" data-min="0.85" data-max="1.25">0.85x – 1.25x (Khuyên dùng)</button>
+            <button type="button" class="preset-btn" data-target="audiorange" data-min="0.85" data-max="1.35">0.85x – 1.35x (Mở rộng)</button>
+            <button type="button" class="preset-btn" data-target="audiorange" data-min="1.00" data-max="1.00">1.00x (Cố định)</button>
             <button type="button" class="preset-btn" data-target="audiorange" data-min="1.00" data-max="1.30">1.00x – 1.30x (Chỉ tăng)</button>
           </div>
           <div style="font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.35;">
-            * Cho phép giọng AI tự điều chỉnh chậm lại (tối thiểu) hoặc tăng nhanh lên (tối đa) để vừa khít câu thoại.
+            * Cho phép giọng AI tự điều chỉnh tốc độ vừa khít câu thoại mà vẫn giữ trọn vẹn ngữ điệu tự nhiên.
           </div>
         </div>
 
-        <!-- Dual Slider 2: Video Speed Range -->
+        <!-- Slider: Smart Gap Borrowing -->
         <div class="slider-group" style="margin-top: 8px;">
           <div class="slider-header">
-            <label>Dải Tốc độ Video (Làm chậm ⟷ Tăng tốc)</label>
-            <span id="videoSpeedRangeBadge" class="slider-badge badge-teal">0.50x ⟷ 1.50x</span>
+            <label>Mượn Khoảng Lặng Tiếp Theo (Gap Borrowing)</label>
+            <span id="gapBorrowBadge" class="slider-badge badge-teal">0.80s (Chống méo tiếng)</span>
           </div>
-          <div class="dual-range-wrapper">
-            <div class="dual-range-track"></div>
-            <div class="dual-range-highlight teal" id="videoRangeHighlight"></div>
-            <input type="range" id="minVideoSpeedSlider" class="dual-range-thumb slider-teal" min="0.30" max="2.00" value="0.50" step="0.05">
-            <input type="range" id="maxVideoSpeedSlider" class="dual-range-thumb slider-teal" min="0.30" max="2.00" value="1.50" step="0.05">
-          </div>
+          <input type="range" id="gapBorrowSlider" class="slider-input slider-teal" min="0.0" max="2.0" value="0.80" step="0.05">
           <div class="quick-presets">
-            <button type="button" class="preset-btn" data-target="videorange" data-min="0.50" data-max="1.50">0.50x – 1.50x (Chuẩn)</button>
-            <button type="button" class="preset-btn" data-target="videorange" data-min="1.00" data-max="1.00">1.00x (Khóa cố định)</button>
-            <button type="button" class="preset-btn" data-target="videorange" data-min="0.70" data-max="1.30">0.70x – 1.30x (Vừa phải)</button>
-            <button type="button" class="preset-btn" data-target="videorange" data-min="0.50" data-max="1.00">0.50x – 1.00x (Chỉ chậm)</button>
+            <button type="button" class="preset-btn" data-target="gapborrow" data-val="0.0">0.0s Tắt</button>
+            <button type="button" class="preset-btn" data-target="gapborrow" data-val="0.5">0.5s Vừa</button>
+            <button type="button" class="preset-btn" data-target="gapborrow" data-val="0.8">0.8s Tối ưu</button>
+            <button type="button" class="preset-btn" data-target="gapborrow" data-val="1.2">1.2s Thoải mái</button>
           </div>
           <div style="font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.35;">
-            * Mức video được phép làm chậm hoặc tăng tốc khi giọng đọc lệch quá giới hạn tốc độ giọng.
+            * Tự động cho phép giọng nói phát tràn sang khoảng trống kế tiếp để không phải ép kéo tốc độ cao gây méo giọng.
           </div>
+        </div>
+
+        <!-- Video Mode Banner & Adaptive Prosody Toggle -->
+        <div style="margin-top: 10px; padding: 10px; border-radius: 8px; background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.3);">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+            <span style="font-weight: 600; font-size: 12px; color: var(--teal); display: flex; align-items: center; gap: 6px;">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"></polyline></svg>
+              Lossless Video Stream Copy (0s Encode)
+            </span>
+            <span class="badge" style="background: rgba(16, 185, 129, 0.2); color: var(--teal); font-size: 10px;">Video gốc 100%</span>
+          </div>
+          <div style="font-size: 11px; color: var(--text-muted); line-height: 1.35; margin-bottom: 8px;">
+            Video gốc không bị cắt nhỏ hay đổi tốc độ khung hình; giữ nguyên 100% chất lượng, màu sắc và độ phân giải.
+          </div>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text); cursor: pointer; text-transform: none;">
+            <input type="checkbox" id="useAdaptiveProsodyCheckbox" checked style="width: auto; cursor: pointer; accent-color: var(--teal);">
+            <span>⚡ Tự động tối ưu Native Prosody Rate từ CapCut AI</span>
+          </label>
         </div>
 
         <!-- Threads Slider -->
-        <div class="slider-group" style="margin-top: 8px;">
+        <div class="slider-group" style="margin-top: 10px;">
           <div class="slider-header">
             <label>Đa luồng xử lý (Threads)</label>
             <span id="threadsValue" class="slider-badge badge-teal">50 luồng</span>
@@ -229,6 +242,7 @@
           </button>
         </div>
       </div>
+
 
     </div>
   </section>

@@ -1,7 +1,8 @@
 """
 High-performance FFmpeg Dubbing & Sync Engine.
-Handles audio stretching (rubberband/atempo), intelligent timeline slice coalescing,
-parallel hardware-accelerated segment encoding (NVIDIA NVENC / CPU), and instant concat demuxing.
+Supports 100% Lossless Video Stream Copy (-c:v copy) with zero video re-encoding,
+and advanced 5-layer anti-distortion AI voice fitting (Native Prosody, Smart Gap Borrowing,
+Rubberband Formant DSP, and Sample-Accurate Timeline Mixing).
 """
 
 import concurrent.futures
@@ -11,6 +12,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,22 +33,6 @@ class VideoMetadata:
     height: int
     fps: float
     has_audio: bool
-
-
-@dataclass
-class VideoSlice:
-    slice_id: int
-    start_sec: float
-    end_sec: float
-    speed: float
-
-    @property
-    def duration_sec(self) -> float:
-        return max(0.01, self.end_sec - self.start_sec)
-
-    @property
-    def output_duration_sec(self) -> float:
-        return self.duration_sec / max(0.1, self.speed)
 
 
 def get_video_metadata(video_path: Union[str, Path]) -> VideoMetadata:
@@ -112,7 +98,7 @@ def get_audio_duration(audio_path: Union[str, Path]) -> float:
 
 def create_silence_wav(output_path: Union[str, Path], duration_sec: float, sample_rate: int = 48000, channels: int = 2):
     """Generate exact sample-accurate 16-bit stereo silence WAV file instantly in pure Python (0.0001s)."""
-    num_samples = int(max(0.001, duration_sec) * sample_rate)
+    num_samples = int(max(0.0005, duration_sec) * sample_rate)
     data = b"\x00" * (num_samples * channels * 2)  # 16-bit PCM = 2 bytes per sample per channel
     with wave.open(str(output_path), "wb") as wf:
         wf.setnchannels(channels)
@@ -121,99 +107,31 @@ def create_silence_wav(output_path: Union[str, Path], duration_sec: float, sampl
         wf.writeframes(data)
 
 
-def coalesce_timeline_slices(timeline_segs: List[TimelineSegment]) -> List[VideoSlice]:
-    """
-    Merge consecutive timeline segments that share identical video speed into contiguous video slices.
-    Reduces thousands of individual subtitle cuts into just ~1-10 continuous video slices!
-    """
-    if not timeline_segs:
-        return []
-
-    slices: List[VideoSlice] = []
-    current_speed = round(timeline_segs[0].video_speed_applied or 1.0, 3)
-    current_start = timeline_segs[0].start_sec
-    current_end = timeline_segs[0].end_sec
-
-    for seg in timeline_segs[1:]:
-        seg_speed = round(seg.video_speed_applied or 1.0, 3)
-        # If speed is virtually identical, keep coalescing seamlessly across all gaps and dubs
-        if abs(seg_speed - current_speed) < 0.01:
-            current_end = max(current_end, seg.end_sec)
-        else:
-            slices.append(VideoSlice(
-                slice_id=len(slices),
-                start_sec=current_start,
-                end_sec=current_end,
-                speed=current_speed,
-            ))
-            current_speed = seg_speed
-            current_start = seg.start_sec
-            current_end = seg.end_sec
-
-    slices.append(VideoSlice(
-        slice_id=len(slices),
-        start_sec=current_start,
-        end_sec=current_end,
-        speed=current_speed,
-    ))
-    return slices
-
-
-_GPU_ENCODER_PARAMS = None
-_GPU_SEMAPHORE = threading.Semaphore(4)
-
-
-def get_best_video_encoder_params(target_fps: float) -> Tuple[str, List[str]]:
-    """Auto-detect the fastest hardware video encoder (NVIDIA NVENC > libx264 ultrafast)."""
-    global _GPU_ENCODER_PARAMS
-    if _GPU_ENCODER_PARAMS is not None:
-        return _GPU_ENCODER_PARAMS[0], _GPU_ENCODER_PARAMS[1] + ["-r", str(target_fps)]
-
-    # Test NVIDIA NVENC
-    try:
-        res = subprocess.run(
-            ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=s=640x360:d=0.2:r=30", "-c:v", "h264_nvenc", "-pix_fmt", "yuv420p", "-f", "null", "-"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=10,
-        )
-        if res.returncode == 0:
-            params = ["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "23", "-b:v", "0", "-pix_fmt", "yuv420p"]
-            _GPU_ENCODER_PARAMS = ("h264_nvenc", params)
-            return "h264_nvenc", params + ["-r", str(target_fps)]
-    except Exception:
-        pass
-
-    # Fallback to libx264 ultrafast (use all CPU threads)
-    params = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22", "-threads", "0", "-pix_fmt", "yuv420p"]
-    _GPU_ENCODER_PARAMS = ("libx264", params)
-    return "libx264", params + ["-r", str(target_fps)]
-
-
 class FFmpegDubbingEngine:
     """
-    Main engine to coordinate TTS generation, segment alignment,
-    rapid parallel voice rendering, full-track background mixing, and high-performance video timeline encoding.
+    Main engine to coordinate AI voice generation with adaptive prosody rate,
+    smart gap borrowing, pitch-preserved rubberband time stretching, and 100% Lossless Stream Copy video muxing.
     """
 
     def __init__(
         self,
         tts_client: Optional[CapCutTTSClient] = None,
-        min_audio_speed: float = 0.80,
-        max_audio_speed: float = 1.20,
-        min_video_speed: float = 0.50,
-        max_video_speed: float = 1.50,
-        min_ratio: Optional[float] = None,
-        max_ratio: Optional[float] = None,
+        min_audio_speed: float = 0.85,
+        max_audio_speed: float = 1.35,
+        max_gap_borrow: float = 0.80,
+        safety_gap_buffer: float = 0.15,
+        use_adaptive_prosody: bool = True,
         orig_volume: float = 0.15,
         dub_volume: float = 1.20,
-        num_workers: int = 4,
+        num_workers: int = 50,
+        **kwargs,
     ):
         self.tts_client = tts_client or CapCutTTSClient()
         self.min_audio_speed = min_audio_speed
         self.max_audio_speed = max_audio_speed
-        self.min_video_speed = min_video_speed
-        self.max_video_speed = max_video_speed
+        self.max_gap_borrow = max_gap_borrow
+        self.safety_gap_buffer = safety_gap_buffer
+        self.use_adaptive_prosody = use_adaptive_prosody
         self.orig_volume = orig_volume
         self.dub_volume = dub_volume
         self.num_workers = num_workers
@@ -230,12 +148,15 @@ class FFmpegDubbingEngine:
         **kwargs,
     ) -> Dict[str, Any]:
         """
-        Execute the high-speed dubbing pipeline:
-        1. Parse video metadata & build continuous timeline segments (dubbing + gaps).
-        2. Generate AI TTS audio for all dubbed subtitles in parallel (with caching).
-        3. Build AI voice track (instant Python silence for gaps, lightweight audio filters for dubs).
-        4. Lower original background audio for entire track in 1 go & mix tracks.
-        5. Lossless Stream Copy (-c:v copy) or GPU parallel timeline slices for final video.
+        Execute the new high-speed Lossless Stream Copy dubbing pipeline:
+        1. Parse video metadata & build continuous timeline segments with next gap map.
+        2. Generate AI TTS audio with Adaptive Prosody Rate in parallel (with caching).
+        3. Calculate sync parameters (Smart Gap Borrowing + Rubberband Formant Stretch).
+        4. Render sample-accurate voice segments and assemble full AI voice track.
+        5. Extract and lower original background audio track (volume ~15%).
+        6. Mix background + AI voice tracks.
+        7. 100% Lossless Stream Copy (-c:v copy) to output MP4 in ~0.5s.
+        8. Export aligned SRT subtitle file.
         """
         video_p = Path(video_path).resolve()
         out_p = Path(output_video_path).resolve()
@@ -258,9 +179,9 @@ class FFmpegDubbingEngine:
                 progress_cb(payload)
 
         # ---------------------------------------------------------------------
-        # Step 1: Probe video & build continuous segments
+        # Step 1: Probe video & build continuous segments with gap map
         # ---------------------------------------------------------------------
-        report(5.0, "init", "Đang phân tích cấu trúc video gốc...")
+        report(5.0, "init", "Đang phân tích cấu trúc video gốc & xây dựng sơ đồ thời gian...")
         video_meta = get_video_metadata(video_p)
 
         timeline_segs = SRTParser.build_timeline_segments(
@@ -273,7 +194,7 @@ class FFmpegDubbingEngine:
         total_segs = len(timeline_segs)
 
         # ---------------------------------------------------------------------
-        # Step 2: Generate TTS Audio for all dubbed subtitles (with Cache & Error Gathering)
+        # Step 2: Generate TTS Audio with Adaptive Prosody Rate (Parallel & Cached)
         # ---------------------------------------------------------------------
         report(10.0, "tts", f"Bắt đầu tạo {total_dubs} câu giọng đọc AI qua CapCut TTS...")
         completed_tts = 0
@@ -281,29 +202,42 @@ class FFmpegDubbingEngine:
         def task_gen_tts(seg: TimelineSegment):
             nonlocal completed_tts
             audio_file = audio_dir / f"audio_seg_{seg.seg_id:04d}.mp3"
-            cached_path = self.tts_client.get_cached_audio_path(seg.text_dub, voice, voice_rate)
+
+            # Determine optimal adaptive prosody rate if enabled
+            if self.use_adaptive_prosody:
+                # Usable duration budget = segment duration + usable next gap
+                usable_gap = max(0.0, seg.next_gap_sec - self.safety_gap_buffer)
+                budget_dur = seg.duration_sec + min(self.max_gap_borrow, usable_gap)
+                seg_rate = CapCutTTSClient.estimate_prosody_rate(
+                    text=seg.text_dub,
+                    target_dur_sec=budget_dur,
+                    base_rate=voice_rate,
+                )
+            else:
+                seg_rate = voice_rate
+
+            seg.prosody_rate_applied = seg_rate
+            cached_path = self.tts_client.get_cached_audio_path(seg.text_dub, voice, seg_rate)
             is_from_cache = bool(
                 (audio_file.exists() and audio_file.stat().st_size > 500)
                 or cached_path
             )
 
             try:
-                # Reuse valid cached audio if available
                 if not (audio_file.exists() and audio_file.stat().st_size > 500):
                     self.tts_client.generate_speech_to_file(
                         text=seg.text_dub,
                         output_file=audio_file,
                         voice=voice,
-                        rate=voice_rate,
+                        rate=seg_rate,
                     )
 
                 aud_dur = get_audio_duration(audio_file)
                 seg.audio_path = str(audio_file)
-                seg.audio_duration_sec = round(aud_dur, 3)
-                seg.ratio = round(seg.duration_sec / max(0.01, aud_dur), 2)
                 seg.tts_error = None
                 seg.is_failed = False
 
+                # Calculate anti-distortion sync parameters (Gap Borrowing + Formant Rubberband)
                 self._calculate_sync_parameters(seg, aud_dur)
 
             except Exception as exc:
@@ -313,10 +247,11 @@ class FFmpegDubbingEngine:
                 seg.audio_duration_sec = None
                 seg.sync_mode = "passthrough"
                 seg.sync_desc = f"Lỗi CapCut TTS: {exc}"
+                seg.speed_warning_level = "critical"
                 logger.warning(f"TTS segment #{seg.seg_id} failed: {exc}")
 
             completed_tts += 1
-            pct = 10.0 + (completed_tts / max(1, total_dubs)) * 35.0
+            pct = 10.0 + (completed_tts / max(1, total_dubs)) * 40.0
             cache_tag = "⚡ [Cache 0s]" if is_from_cache else "🎙️ [Tải CapCut]"
             report(
                 pct,
@@ -327,7 +262,9 @@ class FFmpegDubbingEngine:
                     "ratio": seg.ratio,
                     "sync_mode": seg.sync_mode,
                     "speed_applied": seg.speed_applied,
-                    "video_speed_applied": seg.video_speed_applied,
+                    "borrowed_gap_sec": seg.borrowed_gap_sec,
+                    "prosody_rate_applied": seg.prosody_rate_applied,
+                    "speed_warning_level": seg.speed_warning_level,
                     "sync_desc": seg.sync_desc,
                     "is_failed": seg.is_failed,
                     "tts_error": seg.tts_error,
@@ -347,7 +284,7 @@ class FFmpegDubbingEngine:
         # Check for failed TTS segments
         failed_segs = [s for s in timeline_segs if s.seg_type == "dub" and (s.is_failed or not s.audio_path)]
         if failed_segs and not kwargs.get("skip_failed_auto", False):
-            report(45.0, "tts_needs_review", f"Có {len(failed_segs)} câu bị lỗi CapCut cần xử lý.", {
+            report(50.0, "tts_needs_review", f"Có {len(failed_segs)} câu bị lỗi CapCut cần xử lý.", {
                 "failed_segments": [s.to_dict() for s in failed_segs],
                 "timeline": [s.to_dict() for s in timeline_segs],
             })
@@ -369,53 +306,80 @@ class FFmpegDubbingEngine:
         )
 
     def _calculate_sync_parameters(self, seg: TimelineSegment, aud_dur: float):
-        """Calculate sync mode and speeds for audio and video based on limits."""
-        if abs(aud_dur - seg.duration_sec) < 0.05:
+        """
+        Calculate intelligent anti-distortion sync parameters:
+        1. Natural Match (1.0x)
+        2. Shorter Audio: slight slowdown or natural pause padding
+        3. Longer Audio: Smart Gap Borrowing -> Rubberband Formant Stretch
+        """
+        seg.audio_duration_sec = round(aud_dur, 3)
+        seg.ratio = round(seg.duration_sec / max(0.01, aud_dur), 2)
+        seg.video_speed_applied = 1.0  # Video is ALWAYS 1.0x (untouched)
+
+        # Usable gap after subtitle minus safety buffer
+        usable_gap = max(0.0, seg.next_gap_sec - self.safety_gap_buffer)
+        max_borrow = min(self.max_gap_borrow, usable_gap)
+
+        # Case 1: Audio naturally fits within subtitle duration (within +- 0.05s)
+        if abs(aud_dur - seg.duration_sec) <= 0.05:
             seg.sync_mode = "passthrough"
             seg.speed_applied = 1.0
-            seg.video_speed_applied = 1.0
-            seg.sync_desc = "Chuẩn 1.0x (Khớp)"
+            seg.borrowed_gap_sec = 0.0
+            seg.speed_warning_level = "normal"
+            seg.sync_desc = "Chuẩn 1.0x (Khớp hoàn hảo)"
+            return
 
-        elif aud_dur < seg.duration_sec:
-            # AI Voice is SHORTER than video segment (can slow down voice)
-            req_audio_speed = round(aud_dur / max(0.01, seg.duration_sec), 2)
-            if self.min_audio_speed < 0.999:
-                applied_audio = max(self.min_audio_speed, req_audio_speed)
+        # Case 2: Audio is SHORTER than subtitle duration
+        if aud_dur < seg.duration_sec:
+            req_speed = round(aud_dur / max(0.01, seg.duration_sec), 2)
+            seg.borrowed_gap_sec = 0.0
+            if self.min_audio_speed < 0.999 and req_speed >= self.min_audio_speed:
                 seg.sync_mode = "rubberband"
-                seg.speed_applied = applied_audio
-                seg.video_speed_applied = 1.0
-                seg.sync_desc = f"Giảm giọng {applied_audio:.2f}x (Video 1.0x)"
+                seg.speed_applied = req_speed
+                seg.speed_warning_level = "normal"
+                seg.sync_desc = f"Giảm nhẹ {req_speed:.2f}x"
             else:
                 seg.sync_mode = "passthrough"
                 seg.speed_applied = 1.0
-                seg.video_speed_applied = 1.0
-                seg.sync_desc = "Chuẩn 1.0x (Khớp)"
+                seg.speed_warning_level = "normal"
+                seg.sync_desc = "Chuẩn 1.0x (Đệm khoảng lặng)"
+            return
 
+        # Case 3: Audio is LONGER than subtitle duration
+        excess_dur = aud_dur - seg.duration_sec
+
+        # Step 3A: Try Smart Gap Borrowing first (Zero audio stretching!)
+        if excess_dur <= max_borrow:
+            seg.borrowed_gap_sec = round(excess_dur, 3)
+            seg.sync_mode = "passthrough"
+            seg.speed_applied = 1.0
+            seg.speed_warning_level = "normal"
+            seg.sync_desc = f"Chuẩn 1.0x (Mượn {seg.borrowed_gap_sec:.2f}s khoảng lặng)"
+            return
+
+        # Step 3B: Audio still exceeds (subtitle duration + max_borrow)
+        # Borrow as much gap as safely possible
+        seg.borrowed_gap_sec = round(max_borrow, 3)
+        effective_target_dur = seg.duration_sec + seg.borrowed_gap_sec
+        req_speed = round(aud_dur / max(0.01, effective_target_dur), 2)
+
+        # Apply speed within max_audio_speed limit
+        applied_speed = min(self.max_audio_speed, req_speed)
+        seg.speed_applied = applied_speed
+        seg.sync_mode = "rubberband"
+
+        if applied_speed <= 1.20:
+            seg.speed_warning_level = "normal"
+            gap_note = f" + Mượn {seg.borrowed_gap_sec:.2f}s" if seg.borrowed_gap_sec > 0 else ""
+            seg.sync_desc = f"Tăng nhẹ {applied_speed:.2f}x{gap_note}"
+        elif applied_speed <= 1.35:
+            seg.speed_warning_level = "warning"
+            gap_note = f" + Mượn {seg.borrowed_gap_sec:.2f}s" if seg.borrowed_gap_sec > 0 else ""
+            seg.sync_desc = f"Tăng {applied_speed:.2f}x{gap_note} (Hơi nhanh)"
         else:
-            # AI Voice is LONGER than video segment (speed up voice first)
-            req_audio_speed = round(aud_dur / max(0.01, seg.duration_sec), 2)
-            applied_audio = min(self.max_audio_speed, req_audio_speed)
-
-            # If audio speed adjustment is sufficient (or video speed shouldn't change)
-            if applied_audio >= req_audio_speed - 0.05 or self.min_video_speed >= 0.999:
-                seg.sync_mode = "rubberband"
-                seg.speed_applied = applied_audio
-                seg.video_speed_applied = 1.0
-                seg.sync_desc = f"Tăng giọng {applied_audio:.2f}x (Video 1.0x)"
-            else:
-                # Audio at max speed, video slows down for remaining difference
-                rem_ratio = req_audio_speed / max(0.01, applied_audio)
-                v_speed = max(self.min_video_speed, round(1.0 / max(0.01, rem_ratio), 2))
-                if abs(v_speed - 1.0) > 0.02:
-                    seg.sync_mode = "setpts"
-                    seg.speed_applied = applied_audio
-                    seg.video_speed_applied = v_speed
-                    seg.sync_desc = f"Tăng giọng {applied_audio:.2f}x & Chậm video {v_speed:.2f}x"
-                else:
-                    seg.sync_mode = "rubberband"
-                    seg.speed_applied = applied_audio
-                    seg.video_speed_applied = 1.0
-                    seg.sync_desc = f"Tăng giọng {applied_audio:.2f}x (Video 1.0x)"
+            seg.speed_warning_level = "critical"
+            gap_note = f" + Mượn {seg.borrowed_gap_sec:.2f}s" if seg.borrowed_gap_sec > 0 else ""
+            seg.sync_desc = f"⚠️ Tăng {applied_speed:.2f}x{gap_note} (Quá dài)"
 
     def retry_single_tts_segment(
         self,
@@ -437,16 +401,26 @@ class FFmpegDubbingEngine:
             except Exception:
                 pass
 
+        if self.use_adaptive_prosody:
+            usable_gap = max(0.0, seg.next_gap_sec - self.safety_gap_buffer)
+            budget_dur = seg.duration_sec + min(self.max_gap_borrow, usable_gap)
+            seg_rate = CapCutTTSClient.estimate_prosody_rate(
+                text=seg.text_dub,
+                target_dur_sec=budget_dur,
+                base_rate=voice_rate or "1.0",
+            )
+        else:
+            seg_rate = voice_rate or "1.0"
+
+        seg.prosody_rate_applied = seg_rate
         self.tts_client.generate_speech_to_file(
             text=seg.text_dub,
             output_file=audio_file,
             voice=voice,
-            rate=voice_rate,
+            rate=seg_rate,
         )
         aud_dur = get_audio_duration(audio_file)
         seg.audio_path = str(audio_file)
-        seg.audio_duration_sec = round(aud_dur, 3)
-        seg.ratio = round(seg.duration_sec / max(0.01, aud_dur), 2)
         seg.tts_error = None
         seg.is_failed = False
         self._calculate_sync_parameters(seg, aud_dur)
@@ -462,8 +436,8 @@ class FFmpegDubbingEngine:
         progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
         """
-        Step 3 (High-Speed Voice Track Render & Full Background Audio Mix)
-        and Step 4 (Video Render & Mux).
+        Render voice segments, mix with original background audio,
+        and perform instant Lossless Stream Copy (-c:v copy).
         """
         out_p = Path(output_video_path)
         seg_dir = work_p / "segments"
@@ -480,310 +454,130 @@ class FFmpegDubbingEngine:
                     "data": data or {},
                 })
 
-        # Check if video speed modification is needed
-        has_video_speed_change = any(abs((s.video_speed_applied or 1.0) - 1.0) > 0.01 for s in timeline_segs)
         has_orig_audio = video_meta.has_audio and self.orig_volume > 0.001
-        video_slices = coalesce_timeline_slices(timeline_segs) if has_video_speed_change else []
-
         full_voice_path = work_p / "full_voice_ai.wav"
         full_audio_path = work_p / "full_dubbed_audio.wav"
 
-        # Check if full mixed audio is already rendered and ready
-        if full_audio_path.exists() and full_audio_path.stat().st_size > 1000:
-            report(78.0, "audio_render", "⚡ Tái sử dụng track âm thanh tổng thể đã ghép nối hoàn tất (Chạy thẳng sang Render Video)...")
-        else:
-            # ---------------------------------------------------------------------
-            # Step 3.1: Render AI voice segments in parallel
-            # ---------------------------------------------------------------------
-            if not (full_voice_path.exists() and full_voice_path.stat().st_size > 1000):
-                report(45.0, "audio_render", f"Đang đồng bộ hóa {total_segs} đoạn giọng đọc AI...")
-                completed_auds = 0
+        # ---------------------------------------------------------------------
+        # Step 3.1: Render AI voice segments in parallel
+        # ---------------------------------------------------------------------
+        if not (full_voice_path.exists() and full_voice_path.stat().st_size > 1000):
+            report(55.0, "audio_render", f"Đang đồng bộ hóa {total_segs} đoạn giọng đọc AI & khoảng lặng...")
+            completed_auds = 0
 
-                def task_render_voice_seg(seg: TimelineSegment) -> str:
-                    nonlocal completed_auds
-                    out_aud_path = seg_dir / f"voice_seg_{seg.seg_id:04d}.wav"
-                    seg.output_segment_path = str(out_aud_path)
+            # Map borrowed gaps from preceding dub segments to subsequent gap segments
+            borrowed_map: Dict[int, float] = {}
+            for i, seg in enumerate(timeline_segs):
+                if seg.seg_type == "dub" and seg.borrowed_gap_sec > 0:
+                    if i + 1 < len(timeline_segs) and timeline_segs[i + 1].seg_type == "gap":
+                        borrowed_map[timeline_segs[i + 1].seg_id] = seg.borrowed_gap_sec
 
-                    self._render_single_voice_segment(
-                        seg=seg,
-                        output_path=out_aud_path,
+            def task_render_voice_seg(seg: TimelineSegment) -> str:
+                nonlocal completed_auds
+                out_aud_path = seg_dir / f"voice_seg_{seg.seg_id:04d}.wav"
+                seg.output_segment_path = str(out_aud_path)
+
+                deducted_borrow = borrowed_map.get(seg.seg_id, 0.0)
+                self._render_single_voice_segment(
+                    seg=seg,
+                    output_path=out_aud_path,
+                    deducted_borrow=deducted_borrow,
+                )
+
+                completed_auds += 1
+                if completed_auds % 25 == 0 or completed_auds == total_segs:
+                    pct = 55.0 + (completed_auds / max(1, total_segs)) * 25.0
+                    report(
+                        pct,
+                        "audio_render",
+                        f"Đã xử lý âm thanh AI {completed_auds}/{total_segs} [{seg.seg_type.upper()}] ({seg.sync_desc})",
+                        {"seg_id": seg.seg_id, "seg_type": seg.seg_type, "sync_mode": seg.sync_mode},
                     )
+                return str(out_aud_path)
 
-                    completed_auds += 1
-                    if completed_auds % 25 == 0 or completed_auds == total_segs:
-                        pct = 45.0 + (completed_auds / max(1, total_segs)) * 25.0
-                        report(
-                            pct,
-                            "audio_render",
-                            f"Đã chuẩn bị giọng đọc AI {completed_auds}/{total_segs} [{seg.seg_type.upper()}] ({seg.sync_desc})",
-                            {"seg_id": seg.seg_id, "seg_type": seg.seg_type, "sync_mode": seg.sync_mode},
-                        )
-                    return str(out_aud_path)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(self.num_workers, 32))) as executor:
+                futures = [executor.submit(task_render_voice_seg, seg) for seg in timeline_segs]
+                for f in concurrent.futures.as_completed(futures):
+                    f.result()
 
-                with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(self.num_workers, 32))) as executor:
-                    futures = [executor.submit(task_render_voice_seg, seg) for seg in timeline_segs]
-                    for f in concurrent.futures.as_completed(futures):
-                        f.result()
-
-                # Concat all voice segments into full AI voice track
-                report(70.0, "concat_audio", "Đang ghép nối toàn bộ track giọng đọc AI...")
-                concat_list_path = work_p / "concat_voice_list.txt"
-                with open(concat_list_path, "w", encoding="utf-8") as f:
-                    for seg in timeline_segs:
-                        if seg.output_segment_path and os.path.exists(seg.output_segment_path):
+            # Concat all voice segments into full AI voice track
+            report(80.0, "concat_audio", "Đang ghép nối toàn bộ track giọng đọc AI...")
+            concat_list_path = work_p / "concat_voice_list.txt"
+            with open(concat_list_path, "w", encoding="utf-8") as f:
+                for seg in timeline_segs:
+                    if seg.output_segment_path and os.path.exists(seg.output_segment_path):
+                        # Only include segments with valid size > 44 bytes (WAV header)
+                        if Path(seg.output_segment_path).stat().st_size > 44:
                             safe_path = Path(seg.output_segment_path).resolve().as_posix()
                             f.write(f"file '{safe_path}'\n")
 
-                concat_voice_cmd = [
+            concat_voice_cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(concat_list_path),
+                "-c:a", "pcm_s16le",
+                str(full_voice_path),
+            ]
+            subprocess.run(concat_voice_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
+        else:
+            report(80.0, "concat_audio", "⚡ Tái sử dụng track giọng đọc AI đã ghép nối sẵn...")
+
+        # ---------------------------------------------------------------------
+        # Step 3.2: Extract & mix background audio track
+        # ---------------------------------------------------------------------
+        if has_orig_audio:
+            vol_pct = int(self.orig_volume * 100)
+            report(85.0, "audio_render", f"Đang đồng bộ hóa track âm thanh nền ({vol_pct}%)...")
+            bg_audio_path = work_p / "full_bg_audio.wav"
+
+            if not (bg_audio_path.exists() and bg_audio_path.stat().st_size > 1000):
+                extract_bg_cmd = [
                     "ffmpeg", "-y",
-                    "-f", "concat",
-                    "-safe", "0",
-                    "-i", str(concat_list_path),
-                    "-c:a", "pcm_s16le",
-                    str(full_voice_path),
-                ]
-                subprocess.run(concat_voice_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
-            else:
-                report(70.0, "concat_audio", "⚡ Tái sử dụng track giọng đọc AI đã ghép nối sẵn...")
-
-            # ---------------------------------------------------------------------
-            # Step 3.2: Extract & synchronize background audio track (100% frame-accurate)
-            # ---------------------------------------------------------------------
-            if has_orig_audio:
-                vol_pct = int(self.orig_volume * 100)
-                report(75.0, "audio_render", f"Đang đồng bộ hóa track âm thanh nền ({vol_pct}%) theo dòng thời gian...")
-                bg_audio_path = work_p / "full_bg_audio.wav"
-
-                if not (bg_audio_path.exists() and bg_audio_path.stat().st_size > 1000):
-                    if not has_video_speed_change:
-                        extract_bg_cmd = [
-                            "ffmpeg", "-y",
-                            "-i", str(video_p),
-                            "-vn",
-                            "-af", f"volume={self.orig_volume:.4f},aresample=48000:async=1",
-                            "-c:a", "pcm_s16le",
-                            "-ar", "48000",
-                            "-ac", "2",
-                            str(bg_audio_path),
-                        ]
-                        subprocess.run(extract_bg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
-                    else:
-                        bg_slice_dir = work_p / "bg_slices"
-                        bg_slice_dir.mkdir(parents=True, exist_ok=True)
-                        bg_slice_files: List[Path] = [bg_slice_dir / f"bg_slice_{s.slice_id:04d}.wav" for s in video_slices]
-
-                        def task_render_bg_slice(s: VideoSlice):
-                            out_f = bg_slice_dir / f"bg_slice_{s.slice_id:04d}.wav"
-                            self._render_bg_audio_slice(video_p, s, out_f)
-                            return out_f
-
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(self.num_workers, 16))) as executor:
-                            futures = [executor.submit(task_render_bg_slice, s) for s in video_slices]
-                            for f in concurrent.futures.as_completed(futures):
-                                f.result()
-
-                        concat_bg_list = work_p / "concat_bg_slices.txt"
-                        with open(concat_bg_list, "w", encoding="utf-8") as f:
-                            for bf in bg_slice_files:
-                                if bf.exists():
-                                    safe_p = Path(bf).resolve().as_posix()
-                                    f.write(f"file '{safe_p}'\n")
-
-                        concat_bg_cmd = [
-                            "ffmpeg", "-y",
-                            "-f", "concat",
-                            "-safe", "0",
-                            "-i", str(concat_bg_list),
-                            "-c:a", "pcm_s16le",
-                            str(bg_audio_path),
-                        ]
-                        subprocess.run(concat_bg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
-
-                # Mix lowered & synced background track + AI voice track
-                mix_cmd = [
-                    "ffmpeg", "-y",
-                    "-i", str(bg_audio_path),
-                    "-i", str(full_voice_path),
-                    "-filter_complex", "amix=inputs=2:duration=first:dropout_transition=0",
+                    "-i", str(video_p),
+                    "-vn",
+                    "-af", f"volume={self.orig_volume:.4f},aresample=48000:async=1",
                     "-c:a", "pcm_s16le",
                     "-ar", "48000",
                     "-ac", "2",
-                    str(full_audio_path),
+                    str(bg_audio_path),
                 ]
-                subprocess.run(mix_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
-            else:
-                full_audio_path = full_voice_path
+                subprocess.run(extract_bg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
 
-        # ---------------------------------------------------------------------
-        # Step 4: High-Speed Timeline Video Pipeline
-        # ---------------------------------------------------------------------
-        if not has_video_speed_change:
-            # === SUPER FAST LOSSLESS MODE (-c:v copy) ===
-            report(85.0, "video_render", "Kích hoạt Siêu Tốc (Lossless Stream Copy - 0s video encode)...")
-            final_mux_cmd = [
+            # Mix lowered background track + AI voice track
+            mix_cmd = [
                 "ffmpeg", "-y",
-                "-i", str(video_p),
-                "-i", str(full_audio_path),
-                "-map", "0:v:0",
-                "-map", "1:a:0",
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-b:a", "192k",
-                "-movflags", "+faststart",
-                str(out_p),
+                "-i", str(bg_audio_path),
+                "-i", str(full_voice_path),
+                "-filter_complex", "amix=inputs=2:duration=first:dropout_transition=0",
+                "-c:a", "pcm_s16le",
+                "-ar", "48000",
+                "-ac", "2",
+                str(full_audio_path),
             ]
-            res = subprocess.run(final_mux_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-            if res.returncode != 0:
-                raise RuntimeError(f"Fast Stream Copy Mux failed: {res.stderr.strip() or 'Unknown error'}")
-
+            subprocess.run(mix_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
         else:
-            # === INTELLIGENT TIMELINE COALESCED SINGLE-PASS GPU ENCODING ===
-            total_slices = len(video_slices)
-            target_fps = 30.0 if video_meta.fps <= 0 else min(60.0, video_meta.fps)
-            enc_name, v_encoder_params = get_best_video_encoder_params(target_fps)
+            full_audio_path = full_voice_path
 
-            report(80.0, "video_render", f"Gộp {total_segs} đoạn thành {total_slices} dải video liền mạch. Bắt đầu render GPU ({enc_name})...")
-
-            # Build in-graph filter script for the coalesced slices (only ~20-50 branches, 100% frame-accurate sync!)
-            filter_lines = []
-            concat_tags = []
-            total_target_dur = 0.0
-            for i, v_slice in enumerate(video_slices):
-                pts_factor = 1.0 / max(0.1, v_slice.speed)
-                slice_dur = v_slice.end_sec - v_slice.start_sec
-                total_target_dur += (slice_dur * pts_factor)
-                if abs(pts_factor - 1.0) < 0.001:
-                    filter_lines.append(f"[0:v]trim=start={v_slice.start_sec:.3f}:end={v_slice.end_sec:.3f},setpts=PTS-STARTPTS[v{i}];")
-                else:
-                    filter_lines.append(f"[0:v]trim=start={v_slice.start_sec:.3f}:end={v_slice.end_sec:.3f},setpts={pts_factor:.4f}*(PTS-STARTPTS)[v{i}];")
-                concat_tags.append(f"[v{i}]")
-
-            filter_lines.append(f"{''.join(concat_tags)}concat=n={len(video_slices)}:v=1:a=0[vout]")
-            video_filter_script = work_p / "video_filter_complex.txt"
-            video_filter_script.write_text("\n".join(filter_lines), encoding="utf-8")
-
-            single_pass_cmd = [
-                "ffmpeg", "-y",
-                "-i", str(video_p),
-                "-i", str(full_audio_path),
-                "-filter_complex_script", str(video_filter_script),
-                "-map", "[vout]",
-                "-map", "1:a:0",
-            ] + v_encoder_params + [
-                "-c:a", "aac",
-                "-b:a", "192k",
-                "-movflags", "+faststart",
-                "-progress", "pipe:1",
-                "-nostats",
-                str(out_p),
-            ]
-
-            proc = subprocess.Popen(
-                single_pass_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                errors="replace",
-                bufsize=1,
-            )
-
-            last_report_t = 0.0
-            cur_sec = 0.0
-            fps_str = "0"
-            frame_str = "0"
-            if proc.stdout:
-                for line in proc.stdout:
-                    l_str = line.strip()
-                    if l_str.startswith("out_time_us="):
-                        try:
-                            cur_sec = int(l_str.split("=")[1]) / 1_000_000.0
-                        except Exception:
-                            pass
-                    elif l_str.startswith("out_time="):
-                        parts = l_str.split("=")[1].split(":")
-                        if len(parts) == 3:
-                            try:
-                                cur_sec = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
-                            except Exception:
-                                pass
-                    elif l_str.startswith("fps="):
-                        fps_str = l_str.split("=")[1].strip()
-                    elif l_str.startswith("frame="):
-                        frame_str = l_str.split("=")[1].strip()
-                    elif l_str.startswith("progress="):
-                        now_t = time.time()
-                        if now_t - last_report_t >= 0.5 or l_str == "progress=end":
-                            last_report_t = now_t
-                            if total_target_dur > 0:
-                                ratio = min(1.0, max(0.0, cur_sec / total_target_dur))
-                                pct = 80.0 + ratio * 18.0
-                                m_cur, s_cur = divmod(int(cur_sec), 60)
-                                m_tot, s_tot = divmod(int(total_target_dur), 60)
-                                report(
-                                    pct,
-                                    "video_render",
-                                    f"🎬 Đang Render Video: {pct:.1f}% | Khung hình: {frame_str} ({fps_str} fps) | Thời gian: {m_cur:02d}:{s_cur:02d} / {m_tot:02d}:{s_tot:02d}",
-                                    {"cur_sec": cur_sec, "total_sec": total_target_dur, "fps": fps_str, "frame": frame_str},
-                                )
-
-            proc.wait()
-            if proc.returncode != 0:
-                report(85.0, "video_render", "GPU bận, chuyển sang chế độ CPU Ultrafast Single-Pass...")
-                cpu_v_params = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22", "-pix_fmt", "yuv420p", "-r", str(target_fps)]
-                cpu_cmd = [
-                    "ffmpeg", "-y",
-                    "-i", str(video_p),
-                    "-i", str(full_audio_path),
-                    "-filter_complex_script", str(video_filter_script),
-                    "-map", "[vout]",
-                    "-map", "1:a:0",
-                ] + cpu_v_params + [
-                    "-c:a", "aac",
-                    "-b:a", "192k",
-                    "-movflags", "+faststart",
-                    "-progress", "pipe:1",
-                    "-nostats",
-                    str(out_p),
-                ]
-                cpu_proc = subprocess.Popen(
-                    cpu_cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    errors="replace",
-                    bufsize=1,
-                )
-                if cpu_proc.stdout:
-                    for line in cpu_proc.stdout:
-                        l_str = line.strip()
-                        if l_str.startswith("out_time_us="):
-                            try:
-                                cur_sec = int(l_str.split("=")[1]) / 1_000_000.0
-                            except Exception:
-                                pass
-                        elif l_str.startswith("fps="):
-                            fps_str = l_str.split("=")[1].strip()
-                        elif l_str.startswith("frame="):
-                            frame_str = l_str.split("=")[1].strip()
-                        elif l_str.startswith("progress="):
-                            now_t = time.time()
-                            if now_t - last_report_t >= 0.5 or l_str == "progress=end":
-                                last_report_t = now_t
-                                if total_target_dur > 0:
-                                    ratio = min(1.0, max(0.0, cur_sec / total_target_dur))
-                                    pct = 85.0 + ratio * 13.0
-                                    m_cur, s_cur = divmod(int(cur_sec), 60)
-                                    m_tot, s_tot = divmod(int(total_target_dur), 60)
-                                    report(
-                                        pct,
-                                        "video_render",
-                                        f"🎬 Đang Render Video CPU: {pct:.1f}% | Khung hình: {frame_str} ({fps_str} fps) | Thời gian: {m_cur:02d}:{s_cur:02d} / {m_tot:02d}:{s_tot:02d}",
-                                        {"cur_sec": cur_sec, "total_sec": total_target_dur, "fps": fps_str, "frame": frame_str},
-                                    )
-                cpu_proc.wait()
-                if cpu_proc.returncode != 0:
-                    err_msg = cpu_proc.stderr.read() if cpu_proc.stderr else "Unknown error"
-                    raise RuntimeError(f"Single-Pass Video Render failed: {err_msg}")
+        # ---------------------------------------------------------------------
+        # Step 4: 100% Lossless Stream Copy (-c:v copy)
+        # ---------------------------------------------------------------------
+        report(92.0, "video_render", "⚡ Kích hoạt Siêu Tốc (Lossless Stream Copy - Giữ nguyên 100% Video gốc)...")
+        final_mux_cmd = [
+            "ffmpeg", "-y",
+            "-i", str(video_p),
+            "-i", str(full_audio_path),
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-movflags", "+faststart",
+            str(out_p),
+        ]
+        res = subprocess.run(final_mux_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
+        if res.returncode != 0:
+            raise RuntimeError(f"Lossless Stream Copy Mux failed: {res.stderr.strip() or 'Unknown error'}")
 
         # Export synchronized SRT file alongside final MP4
         out_srt_p = out_p.with_suffix(".srt")
@@ -792,7 +586,7 @@ class FFmpegDubbingEngine:
         except Exception as e:
             logger.warning(f"Could not export synced SRT: {e}")
 
-        report(100.0, "completed", "Hoàn tất! Video & Phụ đề SRT đã được xuất thành công.", {
+        report(100.0, "completed", "Hoàn tất! Video gốc & Phụ đề SRT đã được xuất thành công.", {
             "output_path": str(out_p),
             "output_srt_path": str(out_srt_p) if out_srt_p.exists() else None,
             "total_segments": total_segs,
@@ -813,101 +607,61 @@ class FFmpegDubbingEngine:
         self,
         seg: TimelineSegment,
         output_path: Path,
+        deducted_borrow: float = 0.0,
     ):
         """
-        Render voice stream for a single segment (only touches tiny MP3 TTS files,
-        never touches the heavy video file).
+        Render voice stream for a single segment into high quality 48kHz PCM WAV.
         """
-        # Calculate exact target output duration for this segment
-        if seg.seg_type == "dub" and seg.sync_mode == "setpts":
-            v_speed = seg.video_speed_applied or seg.ratio or 1.0
-            target_dur = seg.duration_sec / max(0.1, v_speed)
-        else:
-            target_dur = seg.duration_sec
+        # Case 1: Gap segment
+        if seg.seg_type == "gap":
+            # If preceding dub segment borrowed from this gap, deduct that duration
+            gap_dur = max(0.001, round(seg.duration_sec - deducted_borrow, 3))
+            create_silence_wav(output_path, duration_sec=gap_dur)
+            return
 
-        # Case 1: Gap or failed/missing TTS audio -> instant pure Python silence WAV (0ms!)
-        if seg.seg_type == "gap" or seg.is_failed or not seg.audio_path or not Path(seg.audio_path).exists():
+        # Target duration for dubbed segment (original duration + borrowed gap)
+        target_dur = max(0.05, round(seg.duration_sec + (seg.borrowed_gap_sec or 0.0), 3))
+
+        # Failed or missing audio -> silence
+        if seg.is_failed or not seg.audio_path or not Path(seg.audio_path).exists():
             create_silence_wav(output_path, duration_sec=target_dur)
             return
 
         # Case 2: Dub segment with valid TTS MP3
         audio_p = Path(seg.audio_path)
         a_common = ["-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]
-
         tempo = seg.speed_applied or 1.0
-        if seg.sync_mode == "rubberband" and abs(tempo - 1.0) > 0.01:
+
+        if abs(tempo - 1.0) > 0.01:
             tempo = max(0.5, min(2.5, tempo))
-            # Try rubberband first
-            filter_str = f"rubberband=tempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}"
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", str(audio_p),
-                "-vn",
-                "-af", filter_str,
-            ] + a_common + [str(output_path)]
+            # Try FFmpeg rubberband filter with formant preservation
+            filter_str = (
+                f"rubberband=tempo={tempo:.4f}:formant=preserved:pitch=1.0:crispness=5,"
+                f"volume={self.dub_volume:.4f},"
+                f"aresample=48000:async=1,"
+                f"apad=whole_dur={target_dur:.4f},"
+                f"atrim=0:{target_dur:.4f}"
+            )
+            cmd = ["ffmpeg", "-y", "-i", str(audio_p), "-vn", "-af", filter_str] + a_common + [str(output_path)]
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
             if res.returncode != 0:
-                # Fallback to built-in atempo
-                filter_str = f"atempo={tempo:.4f},volume={self.dub_volume:.4f},aresample=48000:async=1,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}"
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-i", str(audio_p),
-                    "-vn",
-                    "-af", filter_str,
-                ] + a_common + [str(output_path)]
+                # Fallback to standard atempo filter
+                filter_str = (
+                    f"atempo={tempo:.4f},"
+                    f"volume={self.dub_volume:.4f},"
+                    f"aresample=48000:async=1,"
+                    f"apad=whole_dur={target_dur:.4f},"
+                    f"atrim=0:{target_dur:.4f}"
+                )
+                cmd = ["ffmpeg", "-y", "-i", str(audio_p), "-vn", "-af", filter_str] + a_common + [str(output_path)]
                 subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
         else:
-            # Passthrough 1.0x with volume and sample-accurate pad/trim
-            filter_str = f"volume={self.dub_volume:.4f},aresample=48000:async=1,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}"
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", str(audio_p),
-                "-vn",
-                "-af", filter_str,
-            ] + a_common + [str(output_path)]
+            # 1.0x with sample-accurate volume and pad/trim
+            filter_str = (
+                f"volume={self.dub_volume:.4f},"
+                f"aresample=48000:async=1,"
+                f"apad=whole_dur={target_dur:.4f},"
+                f"atrim=0:{target_dur:.4f}"
+            )
+            cmd = ["ffmpeg", "-y", "-i", str(audio_p), "-vn", "-af", filter_str] + a_common + [str(output_path)]
             subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
-
-    def _render_bg_audio_slice(
-        self,
-        video_p: Path,
-        v_slice: VideoSlice,
-        output_path: Path,
-    ):
-        """Render background audio for a single coalesced slice matching exact video speed & duration."""
-        target_dur = v_slice.output_duration_sec
-        a_common = ["-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]
-
-        if abs(v_slice.speed - 1.0) < 0.005:
-            # 1.0x normal speed: exact cut + volume + pad/trim
-            cmd = [
-                "ffmpeg", "-y",
-                "-ss", f"{v_slice.start_sec:.3f}",
-                "-t", f"{v_slice.duration_sec:.3f}",
-                "-i", str(video_p),
-                "-vn",
-                "-af", f"volume={self.orig_volume:.4f},aresample=48000:async=1,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}",
-            ] + a_common + [str(output_path)]
-        else:
-            # Speed modification: stretch audio tempo to match stretched video slice duration
-            tempo = max(0.25, min(4.0, v_slice.speed))
-            cmd = [
-                "ffmpeg", "-y",
-                "-ss", f"{v_slice.start_sec:.3f}",
-                "-t", f"{v_slice.duration_sec:.3f}",
-                "-i", str(video_p),
-                "-vn",
-                "-af", f"volume={self.orig_volume:.4f},rubberband=tempo={tempo:.4f},aresample=48000:async=1,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}",
-            ] + a_common + [str(output_path)]
-
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-        if res.returncode != 0:
-            tempo = max(0.5, min(2.0, v_slice.speed))
-            fallback_cmd = [
-                "ffmpeg", "-y",
-                "-ss", f"{v_slice.start_sec:.3f}",
-                "-t", f"{v_slice.duration_sec:.3f}",
-                "-i", str(video_p),
-                "-vn",
-                "-af", f"volume={self.orig_volume:.4f},atempo={tempo:.4f},aresample=48000:async=1,apad=whole_dur={target_dur:.4f},atrim=0:{target_dur:.4f}",
-            ] + a_common + [str(output_path)]
-            subprocess.run(fallback_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
