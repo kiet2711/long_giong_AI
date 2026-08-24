@@ -871,6 +871,46 @@ footer {
   border-color: var(--teal);
 }
 
+/* CUSTOM SPEED NUMBER INPUTS */
+.custom-speed-box {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--panel-2);
+  padding: 1px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  transition: all 0.2s ease;
+}
+.custom-speed-box:focus-within {
+  border-color: var(--amber);
+  background: rgba(255, 138, 61, 0.06);
+  box-shadow: 0 0 10px rgba(255, 138, 61, 0.25);
+}
+.compact-speed-num {
+  width: 42px !important;
+  height: 22px !important;
+  padding: 0 2px !important;
+  font-size: 11px !important;
+  font-family: 'JetBrains Mono', monospace !important;
+  font-weight: 600 !important;
+  text-align: center !important;
+  background: transparent !important;
+  border: none !important;
+  color: var(--amber) !important;
+  outline: none !important;
+  -moz-appearance: textfield;
+}
+.compact-speed-num::-webkit-inner-spin-button,
+.compact-speed-num::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.compact-speed-num:focus {
+  background: rgba(255, 138, 61, 0.15) !important;
+  border-radius: 4px;
+}
+
 /* Floating Job Status Pill */
 .floating-job-pill {
   position: fixed;

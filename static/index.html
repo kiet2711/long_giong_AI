@@ -173,24 +173,36 @@
 
         <!-- Dual Slider 1: AI Audio Speed Range -->
         <div class="slider-group" style="margin-top: 8px;">
-          <div class="slider-header">
-            <label>Dải Tốc độ Giọng đọc AI (Tối thiểu ⟷ Tối đa)</label>
-            <span id="audioSpeedRangeBadge" class="slider-badge badge-amber">0.85x ⟷ 1.35x</span>
+          <div class="slider-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <label style="margin-bottom: 0;">Dải Tốc độ Giọng đọc AI (Tối thiểu ⟷ Tối đa)</label>
+            <div style="display: flex; align-items: center; gap: 6px;">
+              <div class="custom-speed-box" title="Nhập số trực tiếp (vd: 0.80 và 1.40). Hệ thống sẽ tự nhớ làm mặc định cho các lần sau.">
+                <input type="number" id="minAudioSpeedInput" class="compact-speed-num" min="0.50" max="2.00" step="0.05" value="0.80" title="Tốc độ tối thiểu (vd: 0.80)">
+                <span style="font-size: 10px; color: var(--muted); padding: 0 1px;">⟷</span>
+                <input type="number" id="maxAudioSpeedInput" class="compact-speed-num" min="0.50" max="2.00" step="0.05" value="1.40" title="Tốc độ tối đa (vd: 1.40)">
+                <span style="font-size: 11px; color: var(--amber); font-weight: 700; padding-right: 2px;">x</span>
+              </div>
+              <span id="audioSpeedRangeBadge" class="slider-badge badge-amber" style="display: none;">0.80x ⟷ 1.40x</span>
+            </div>
           </div>
           <div class="dual-range-wrapper">
             <div class="dual-range-track"></div>
             <div class="dual-range-highlight" id="audioRangeHighlight"></div>
-            <input type="range" id="minAudioSpeedSlider" class="dual-range-thumb" min="0.70" max="1.80" value="0.85" step="0.05">
-            <input type="range" id="maxAudioSpeedSlider" class="dual-range-thumb" min="0.70" max="1.80" value="1.35" step="0.05">
+            <input type="range" id="minAudioSpeedSlider" class="dual-range-thumb" min="0.50" max="2.00" value="0.80" step="0.05">
+            <input type="range" id="maxAudioSpeedSlider" class="dual-range-thumb" min="0.50" max="2.00" value="1.40" step="0.05">
           </div>
           <div class="quick-presets">
-            <button type="button" class="preset-btn" data-target="audiorange" data-min="0.85" data-max="1.25">0.85x – 1.25x (Khuyên dùng)</button>
-            <button type="button" class="preset-btn" data-target="audiorange" data-min="0.85" data-max="1.35">0.85x – 1.35x (Mở rộng)</button>
+            <button type="button" class="preset-btn" data-target="audiorange" data-min="0.80" data-max="1.25">0.80x – 1.25x (Tự nhiên)</button>
+            <button type="button" class="preset-btn" data-target="audiorange" data-min="0.80" data-max="1.40">0.80x – 1.40x (Khuyên dùng)</button>
             <button type="button" class="preset-btn" data-target="audiorange" data-min="1.00" data-max="1.00">1.00x (Cố định)</button>
-            <button type="button" class="preset-btn" data-target="audiorange" data-min="1.00" data-max="1.30">1.00x – 1.30x (Chỉ tăng)</button>
+            <button type="button" class="preset-btn" data-target="audiorange" data-min="0.70" data-max="1.80">0.70x – 1.80x (Mở rộng)</button>
           </div>
-          <div style="font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.35;">
-            * Cho phép giọng AI tự điều chỉnh tốc độ vừa khít câu thoại mà vẫn giữ trọn vẹn ngữ điệu tự nhiên.
+          <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.35;">
+            <span>* Có thể nhập số trực tiếp hoặc kéo thanh trượt (atempo giữ chuẩn cao độ).</span>
+            <span id="speedSaveHint" style="color: var(--teal); font-size: 10px; opacity: 0; transition: opacity 0.3s ease; font-weight: 500; display: inline-flex; align-items: center; gap: 3px;">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"></polyline></svg>
+              Đã lưu mặc định
+            </span>
           </div>
         </div>
 

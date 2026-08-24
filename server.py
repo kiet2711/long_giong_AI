@@ -578,8 +578,8 @@ class StartDubbingRequest(BaseModel):
     srt_orig_path: Optional[str] = None
     voice: Optional[str] = "BV421_vivn_streaming"
     voice_rate: Optional[str] = "1.0"
-    min_audio_speed: Optional[float] = 0.85
-    max_audio_speed: Optional[float] = 1.35
+    min_audio_speed: Optional[float] = 0.80
+    max_audio_speed: Optional[float] = 1.40
     max_gap_borrow: Optional[float] = 0.80
     safety_gap_buffer: Optional[float] = 0.15
     use_adaptive_prosody: Optional[bool] = True
@@ -634,8 +634,8 @@ async def start_dubbing(req: StartDubbingRequest):
         try:
             engine = FFmpegDubbingEngine(
                 tts_client=tts_client,
-                min_audio_speed=req.min_audio_speed if req.min_audio_speed is not None else 0.85,
-                max_audio_speed=req.max_audio_speed if req.max_audio_speed is not None else 1.35,
+                min_audio_speed=req.min_audio_speed if req.min_audio_speed is not None else 0.80,
+                max_audio_speed=req.max_audio_speed if req.max_audio_speed is not None else 1.40,
                 max_gap_borrow=req.max_gap_borrow if req.max_gap_borrow is not None else 0.80,
                 safety_gap_buffer=req.safety_gap_buffer if req.safety_gap_buffer is not None else 0.15,
                 use_adaptive_prosody=req.use_adaptive_prosody if req.use_adaptive_prosody is not None else True,
@@ -955,8 +955,8 @@ async def resume_dubbing_render(req: ResumeRenderRequest):
     if not engine:
         engine = FFmpegDubbingEngine(
             tts_client=tts_client,
-            min_audio_speed=getattr(req_obj, "min_audio_speed", 0.85) if req_obj else 0.85,
-            max_audio_speed=getattr(req_obj, "max_audio_speed", 1.35) if req_obj else 1.35,
+            min_audio_speed=getattr(req_obj, "min_audio_speed", 0.80) if req_obj else 0.80,
+            max_audio_speed=getattr(req_obj, "max_audio_speed", 1.40) if req_obj else 1.40,
             max_gap_borrow=getattr(req_obj, "max_gap_borrow", 0.80) if req_obj else 0.80,
             safety_gap_buffer=getattr(req_obj, "safety_gap_buffer", 0.15) if req_obj else 0.15,
             use_adaptive_prosody=getattr(req_obj, "use_adaptive_prosody", True) if req_obj else True,

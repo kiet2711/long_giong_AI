@@ -14,12 +14,12 @@ if sys.stdout:
     except Exception:
         pass
 
-from core.ffmpeg_engine import FFmpegDubbingEngine, create_silence_wav, get_video_metadata
+from core.ffmpeg_engine import FFmpegDubbingEngine, build_atempo_filter, create_silence_wav, get_video_metadata
 from core.srt_parser import SRTParser, SubtitleItem, TimelineSegment
 from core.tts_client import CapCutTTSClient
 
 print("=" * 60)
-print("TEST 1: Testing Adaptive Prosody Rate Estimation")
+print("TEST 1: Testing Adaptive Prosody Rate Estimation & atempo filter builder")
 print("=" * 60)
 
 test_cases = [
@@ -31,6 +31,20 @@ test_cases = [
 for text, dur, base, desc in test_cases:
     rate = CapCutTTSClient.estimate_prosody_rate(text, dur, base)
     print(f"Text: \"{text[:30]}...\" | Target: {dur}s | Base: {base} -> Estimated Rate: {rate} ({desc})")
+
+# Test build_atempo_filter
+atempo_tests = [
+    (1.0, "atempo=1.0000"),
+    (1.25, "atempo=1.2500"),
+    (2.0, "atempo=2.0000"),
+    (2.4, "atempo=2.0000,atempo=1.2000"),
+    (0.4, "atempo=0.5000,atempo=0.8000"),
+]
+for ratio, expected in atempo_tests:
+    f_str = build_atempo_filter(ratio)
+    print(f"Ratio {ratio}x -> atempo chain: {f_str}")
+    assert f_str == expected, f"Expected {expected}, got {f_str}"
+print("All atempo filter chain tests passed!")
 
 print("\n" + "=" * 60)
 print("TEST 2: Testing Timeline Segment Builder & Gap Map")
@@ -56,12 +70,12 @@ assert abs(dub1.next_gap_sec - 1.5) < 0.01, f"Expected next_gap 1.5s, got {dub1.
 print("Gap calculations verified successfully!")
 
 print("\n" + "=" * 60)
-print("TEST 3: Testing Anti-Distortion Sync Parameters & Gap Borrowing")
+print("TEST 3: Testing Anti-Distortion Sync Parameters & Gap Borrowing (atempo)")
 print("=" * 60)
 
 engine = FFmpegDubbingEngine(
-    min_audio_speed=0.85,
-    max_audio_speed=1.35,
+    min_audio_speed=0.80,
+    max_audio_speed=1.40,
     max_gap_borrow=0.80,
     safety_gap_buffer=0.15,
 )
@@ -78,11 +92,11 @@ engine._calculate_sync_parameters(seg_b, aud_dur=2.4)
 print(f"Case 3B (2.4s audio in 2.0s slot with 1.5s gap): mode={seg_b.sync_mode}, speed={seg_b.speed_applied}x, borrowed={seg_b.borrowed_gap_sec}s -> {seg_b.sync_desc}")
 assert seg_b.speed_applied == 1.0 and abs(seg_b.borrowed_gap_sec - 0.4) < 0.01
 
-# Test 3C: Audio much longer (3.2s audio for 2.0s duration, max_gap_borrow=0.8s) -> Should borrow 0.8s gap and stretch slightly
+# Test 3C: Audio much longer (3.2s audio for 2.0s duration, max_gap_borrow=0.8s) -> Should borrow 0.8s gap and stretch slightly via atempo
 seg_c = TimelineSegment(seg_id=3, seg_type="dub", start_sec=1.0, end_sec=3.0, duration_sec=2.0, next_gap_sec=1.5)
 engine._calculate_sync_parameters(seg_c, aud_dur=3.2)
 print(f"Case 3C (3.2s audio in 2.0s slot): mode={seg_c.sync_mode}, speed={seg_c.speed_applied}x, borrowed={seg_c.borrowed_gap_sec}s -> {seg_c.sync_desc}")
-assert seg_c.borrowed_gap_sec == 0.80 and seg_c.speed_applied > 1.0
+assert seg_c.borrowed_gap_sec == 0.80 and seg_c.speed_applied > 1.0 and seg_c.sync_mode == "atempo"
 
 print("\n" + "=" * 60)
 print("TEST 4: End-to-End Pipeline on Synthetic Video (Lossless Stream Copy)")

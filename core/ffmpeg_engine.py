@@ -107,17 +107,41 @@ def create_silence_wav(output_path: Union[str, Path], duration_sec: float, sampl
         wf.writeframes(data)
 
 
+def build_atempo_filter(ratio: float) -> str:
+    """
+    Build an optimal pitch-preserving FFmpeg atempo filter chain for any positive ratio.
+    FFmpeg's atempo filter natively accepts factors in [0.5, 2.0].
+    For values outside this range (e.g. >2.0 or <0.5), we multiplicatively chain stages
+    together (e.g. 2.4x -> atempo=2.0,atempo=1.2; 0.4x -> atempo=0.5,atempo=0.8) to guarantee 100% stability.
+    """
+    if ratio <= 0.001:
+        return "atempo=1.0000"
+    if 0.5 <= ratio <= 2.0:
+        return f"atempo={ratio:.4f}"
+
+    parts: List[float] = []
+    r = ratio
+    while r > 2.0:
+        parts.append(2.0)
+        r /= 2.0
+    while r < 0.5:
+        parts.append(0.5)
+        r /= 0.5
+    parts.append(r)
+    return ",".join(f"atempo={p:.4f}" for p in parts)
+
+
 class FFmpegDubbingEngine:
     """
     Main engine to coordinate AI voice generation with adaptive prosody rate,
-    smart gap borrowing, pitch-preserved rubberband time stretching, and 100% Lossless Stream Copy video muxing.
+    smart gap borrowing, pitch-preserving atempo time stretching, and 100% Lossless Stream Copy video muxing.
     """
 
     def __init__(
         self,
         tts_client: Optional[CapCutTTSClient] = None,
-        min_audio_speed: float = 0.85,
-        max_audio_speed: float = 1.35,
+        min_audio_speed: float = 0.80,
+        max_audio_speed: float = 1.40,
         max_gap_borrow: float = 0.80,
         safety_gap_buffer: float = 0.15,
         use_adaptive_prosody: bool = True,
@@ -309,8 +333,8 @@ class FFmpegDubbingEngine:
         """
         Calculate intelligent anti-distortion sync parameters:
         1. Natural Match (1.0x)
-        2. Shorter Audio: slight slowdown or natural pause padding
-        3. Longer Audio: Smart Gap Borrowing -> Rubberband Formant Stretch
+        2. Shorter Audio: slight slowdown (atempo) or natural pause padding
+        3. Longer Audio: Smart Gap Borrowing -> Pitch-preserving atempo time stretch
         """
         seg.audio_duration_sec = round(aud_dur, 3)
         seg.ratio = round(seg.duration_sec / max(0.01, aud_dur), 2)
@@ -334,10 +358,10 @@ class FFmpegDubbingEngine:
             req_speed = round(aud_dur / max(0.01, seg.duration_sec), 2)
             seg.borrowed_gap_sec = 0.0
             if self.min_audio_speed < 0.999 and req_speed >= self.min_audio_speed:
-                seg.sync_mode = "rubberband"
+                seg.sync_mode = "atempo"
                 seg.speed_applied = req_speed
                 seg.speed_warning_level = "normal"
-                seg.sync_desc = f"Giảm nhẹ {req_speed:.2f}x"
+                seg.sync_desc = f"Giảm nhẹ {req_speed:.2f}x (atempo)"
             else:
                 seg.sync_mode = "passthrough"
                 seg.speed_applied = 1.0
@@ -366,20 +390,18 @@ class FFmpegDubbingEngine:
         # Apply speed within max_audio_speed limit
         applied_speed = min(self.max_audio_speed, req_speed)
         seg.speed_applied = applied_speed
-        seg.sync_mode = "rubberband"
+        seg.sync_mode = "atempo"
 
-        if applied_speed <= 1.20:
+        gap_note = f" + Mượn {seg.borrowed_gap_sec:.2f}s" if seg.borrowed_gap_sec > 0 else ""
+        if applied_speed <= 1.25:
             seg.speed_warning_level = "normal"
-            gap_note = f" + Mượn {seg.borrowed_gap_sec:.2f}s" if seg.borrowed_gap_sec > 0 else ""
-            seg.sync_desc = f"Tăng nhẹ {applied_speed:.2f}x{gap_note}"
-        elif applied_speed <= 1.35:
+            seg.sync_desc = f"Tăng nhẹ {applied_speed:.2f}x{gap_note} (atempo)"
+        elif applied_speed <= 1.50:
             seg.speed_warning_level = "warning"
-            gap_note = f" + Mượn {seg.borrowed_gap_sec:.2f}s" if seg.borrowed_gap_sec > 0 else ""
-            seg.sync_desc = f"Tăng {applied_speed:.2f}x{gap_note} (Hơi nhanh)"
+            seg.sync_desc = f"Tăng {applied_speed:.2f}x{gap_note} (Khá nhanh)"
         else:
             seg.speed_warning_level = "critical"
-            gap_note = f" + Mượn {seg.borrowed_gap_sec:.2f}s" if seg.borrowed_gap_sec > 0 else ""
-            seg.sync_desc = f"⚠️ Tăng {applied_speed:.2f}x{gap_note} (Quá dài)"
+            seg.sync_desc = f"⚡ Tăng {applied_speed:.2f}x{gap_note} (atempo)"
 
     def retry_single_tts_segment(
         self,
@@ -633,28 +655,14 @@ class FFmpegDubbingEngine:
         tempo = seg.speed_applied or 1.0
 
         if abs(tempo - 1.0) > 0.01:
-            tempo = max(0.5, min(2.5, tempo))
-            # Try FFmpeg rubberband filter with formant preservation
+            atempo_chain = build_atempo_filter(tempo)
             filter_str = (
-                f"rubberband=tempo={tempo:.4f}:formant=preserved:pitch=1.0:crispness=5,"
+                f"{atempo_chain},"
                 f"volume={self.dub_volume:.4f},"
                 f"aresample=48000:async=1,"
                 f"apad=whole_dur={target_dur:.4f},"
                 f"atrim=0:{target_dur:.4f}"
             )
-            cmd = ["ffmpeg", "-y", "-i", str(audio_p), "-vn", "-af", filter_str] + a_common + [str(output_path)]
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-            if res.returncode != 0:
-                # Fallback to standard atempo filter
-                filter_str = (
-                    f"atempo={tempo:.4f},"
-                    f"volume={self.dub_volume:.4f},"
-                    f"aresample=48000:async=1,"
-                    f"apad=whole_dur={target_dur:.4f},"
-                    f"atrim=0:{target_dur:.4f}"
-                )
-                cmd = ["ffmpeg", "-y", "-i", str(audio_p), "-vn", "-af", filter_str] + a_common + [str(output_path)]
-                subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
         else:
             # 1.0x with sample-accurate volume and pad/trim
             filter_str = (
@@ -663,5 +671,6 @@ class FFmpegDubbingEngine:
                 f"apad=whole_dur={target_dur:.4f},"
                 f"atrim=0:{target_dur:.4f}"
             )
-            cmd = ["ffmpeg", "-y", "-i", str(audio_p), "-vn", "-af", filter_str] + a_common + [str(output_path)]
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
+
+        cmd = ["ffmpeg", "-y", "-i", str(audio_p), "-vn", "-af", filter_str] + a_common + [str(output_path)]
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)

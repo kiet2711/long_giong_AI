@@ -38,6 +38,9 @@ const el = {
   audioRangeHighlight: document.getElementById('audioRangeHighlight'),
   minAudioSpeedSlider: document.getElementById('minAudioSpeedSlider'),
   maxAudioSpeedSlider: document.getElementById('maxAudioSpeedSlider'),
+  minAudioSpeedInput: document.getElementById('minAudioSpeedInput'),
+  maxAudioSpeedInput: document.getElementById('maxAudioSpeedInput'),
+  speedSaveHint: document.getElementById('speedSaveHint'),
   gapBorrowSlider: document.getElementById('gapBorrowSlider'),
   gapBorrowBadge: document.getElementById('gapBorrowBadge'),
   useAdaptiveProsodyCheckbox: document.getElementById('useAdaptiveProsodyCheckbox'),
@@ -159,7 +162,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadSampleMockData();
   updateOrigVolUI();
   updateDubVolUI();
-  updateSpeedLimitsUI();
+  initSpeedLimitsFromStorage();
   updateGapBorrowUI();
   updateCacheStatsBadge();
   updateGeminiKeyCountUI();
@@ -167,21 +170,66 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 
-function updateSpeedLimitsUI() {
-  // Audio Speed Range (0.70 to 1.80, total span = 1.10)
+function getStoredSpeedLimits() {
+  try {
+    const savedMin = localStorage.getItem('user_min_audio_speed');
+    const savedMax = localStorage.getItem('user_max_audio_speed');
+    return {
+      min: savedMin !== null && !isNaN(parseFloat(savedMin)) ? parseFloat(savedMin) : 0.80,
+      max: savedMax !== null && !isNaN(parseFloat(savedMax)) ? parseFloat(savedMax) : 1.40,
+    };
+  } catch (e) {
+    return { min: 0.80, max: 1.40 };
+  }
+}
+
+let speedSaveTimer = null;
+function saveStoredSpeedLimits(minA, maxA) {
+  try {
+    localStorage.setItem('user_min_audio_speed', minA.toFixed(2));
+    localStorage.setItem('user_max_audio_speed', maxA.toFixed(2));
+    if (el.speedSaveHint) {
+      el.speedSaveHint.style.opacity = '1';
+      clearTimeout(speedSaveTimer);
+      speedSaveTimer = setTimeout(() => {
+        if (el.speedSaveHint) el.speedSaveHint.style.opacity = '0';
+      }, 1500);
+    }
+  } catch (e) {}
+}
+
+function initSpeedLimitsFromStorage() {
+  const saved = getStoredSpeedLimits();
+  if (el.minAudioSpeedSlider) el.minAudioSpeedSlider.value = saved.min;
+  if (el.maxAudioSpeedSlider) el.maxAudioSpeedSlider.value = saved.max;
+  if (el.minAudioSpeedInput) el.minAudioSpeedInput.value = saved.min.toFixed(2);
+  if (el.maxAudioSpeedInput) el.maxAudioSpeedInput.value = saved.max.toFixed(2);
+  updateSpeedLimitsUI(false);
+}
+
+function updateSpeedLimitsUI(shouldSave = true) {
+  // Audio Speed Range (0.50 to 2.00, total span = 1.50)
   if (el.minAudioSpeedSlider && el.maxAudioSpeedSlider) {
-    let minA = parseFloat(el.minAudioSpeedSlider.value) || 0.85;
-    let maxA = parseFloat(el.maxAudioSpeedSlider.value) || 1.35;
+    let minA = parseFloat(el.minAudioSpeedSlider.value) || 0.80;
+    let maxA = parseFloat(el.maxAudioSpeedSlider.value) || 1.40;
     if (minA > maxA) {
       minA = maxA;
       el.minAudioSpeedSlider.value = minA;
     }
 
-    const leftPct = ((minA - 0.70) / 1.10) * 100;
-    const rightPct = ((maxA - 0.70) / 1.10) * 100;
+    const leftPct = Math.max(0, Math.min(100, ((minA - 0.50) / 1.50) * 100));
+    const rightPct = Math.max(0, Math.min(100, ((maxA - 0.50) / 1.50) * 100));
     if (el.audioRangeHighlight) {
       el.audioRangeHighlight.style.left = `${leftPct}%`;
       el.audioRangeHighlight.style.width = `${Math.max(2, rightPct - leftPct)}%`;
+    }
+
+    // Sync input boxes if they are not actively being focused/edited by user
+    if (el.minAudioSpeedInput && document.activeElement !== el.minAudioSpeedInput) {
+      el.minAudioSpeedInput.value = minA.toFixed(2);
+    }
+    if (el.maxAudioSpeedInput && document.activeElement !== el.maxAudioSpeedInput) {
+      el.maxAudioSpeedInput.value = maxA.toFixed(2);
     }
 
     if (el.audioSpeedRangeBadge) {
@@ -192,6 +240,10 @@ function updateSpeedLimitsUI() {
       } else {
         el.audioSpeedRangeBadge.textContent = `${minA.toFixed(2)}x ⟷ ${maxA.toFixed(2)}x`;
       }
+    }
+
+    if (shouldSave) {
+      saveStoredSpeedLimits(minA, maxA);
     }
   }
 }
@@ -310,7 +362,7 @@ function setupEventListeners() {
       const minA = parseFloat(el.minAudioSpeedSlider.value);
       const maxA = parseFloat(el.maxAudioSpeedSlider.value);
       if (minA > maxA) el.maxAudioSpeedSlider.value = minA;
-      updateSpeedLimitsUI();
+      updateSpeedLimitsUI(true);
       if (state.subtitles.length > 0) renderSubtitleList(state.subtitles);
     });
 
@@ -318,9 +370,46 @@ function setupEventListeners() {
       const minA = parseFloat(el.minAudioSpeedSlider.value);
       const maxA = parseFloat(el.maxAudioSpeedSlider.value);
       if (maxA < minA) el.minAudioSpeedSlider.value = maxA;
-      updateSpeedLimitsUI();
+      updateSpeedLimitsUI(true);
       if (state.subtitles.length > 0) renderSubtitleList(state.subtitles);
     });
+  }
+
+  // Direct Number Input for Audio Speed Range
+  if (el.minAudioSpeedInput) {
+    const handleMinInputChange = () => {
+      let val = parseFloat(el.minAudioSpeedInput.value);
+      if (isNaN(val)) val = 0.80;
+      val = Math.max(0.50, Math.min(2.00, Math.round(val * 100) / 100));
+      if (el.minAudioSpeedSlider) el.minAudioSpeedSlider.value = val;
+      const maxVal = parseFloat(el.maxAudioSpeedSlider ? el.maxAudioSpeedSlider.value : 1.40) || 1.40;
+      if (val > maxVal) {
+        if (el.maxAudioSpeedSlider) el.maxAudioSpeedSlider.value = val;
+        if (el.maxAudioSpeedInput) el.maxAudioSpeedInput.value = val.toFixed(2);
+      }
+      updateSpeedLimitsUI(true);
+      if (state.subtitles.length > 0) renderSubtitleList(state.subtitles);
+    };
+    el.minAudioSpeedInput.addEventListener('change', handleMinInputChange);
+    el.minAudioSpeedInput.addEventListener('blur', handleMinInputChange);
+  }
+
+  if (el.maxAudioSpeedInput) {
+    const handleMaxInputChange = () => {
+      let val = parseFloat(el.maxAudioSpeedInput.value);
+      if (isNaN(val)) val = 1.40;
+      val = Math.max(0.50, Math.min(2.00, Math.round(val * 100) / 100));
+      if (el.maxAudioSpeedSlider) el.maxAudioSpeedSlider.value = val;
+      const minVal = parseFloat(el.minAudioSpeedSlider ? el.minAudioSpeedSlider.value : 0.80) || 0.80;
+      if (val < minVal) {
+        if (el.minAudioSpeedSlider) el.minAudioSpeedSlider.value = val;
+        if (el.minAudioSpeedInput) el.minAudioSpeedInput.value = val.toFixed(2);
+      }
+      updateSpeedLimitsUI(true);
+      if (state.subtitles.length > 0) renderSubtitleList(state.subtitles);
+    };
+    el.maxAudioSpeedInput.addEventListener('change', handleMaxInputChange);
+    el.maxAudioSpeedInput.addEventListener('blur', handleMaxInputChange);
   }
 
   // Gap Borrowing Slider
@@ -1110,8 +1199,8 @@ async function startDubbingProcess() {
     srt_orig_path: state.srtOrigPath,
     voice: el.voiceSelect.value,
     voice_rate: el.voiceRateSelect.value,
-    min_audio_speed: el.minAudioSpeedSlider ? parseFloat(el.minAudioSpeedSlider.value) : 0.85,
-    max_audio_speed: el.maxAudioSpeedSlider ? parseFloat(el.maxAudioSpeedSlider.value) : 1.35,
+    min_audio_speed: el.minAudioSpeedSlider ? parseFloat(el.minAudioSpeedSlider.value) : 0.80,
+    max_audio_speed: el.maxAudioSpeedSlider ? parseFloat(el.maxAudioSpeedSlider.value) : 1.40,
     max_gap_borrow: el.gapBorrowSlider ? parseFloat(el.gapBorrowSlider.value) : 0.80,
     use_adaptive_prosody: el.useAdaptiveProsodyCheckbox ? el.useAdaptiveProsodyCheckbox.checked : true,
     orig_volume: origVolVal,
