@@ -29,7 +29,7 @@ const el = {
   videoFileName: document.getElementById('videoFileName'),
   srtDubFileName: document.getElementById('srtDubFileName'),
   srtOrigFileName: document.getElementById('srtOrigFileName'),
-  
+
   // Voice & Tuning
   voiceSelect: document.getElementById('voiceSelect'),
   voiceRateSelect: document.getElementById('voiceRateSelect'),
@@ -73,6 +73,15 @@ const el = {
   captionText: document.getElementById('captionText'),
   playBtn: document.getElementById('playBtn'),
   playIcon: document.getElementById('playIcon'),
+  fsBtn: document.getElementById('fsBtn'),
+  muteBtn: document.getElementById('muteBtn'),
+  muteIcon: document.getElementById('muteIcon'),
+  pipBtn: document.getElementById('pipBtn'),
+  speedBtn: document.getElementById('speedBtn'),
+  speedMenuPopup: document.getElementById('speedMenuPopup'),
+  speedMenuWrap: document.getElementById('speedMenuWrap'),
+  rewindBtn: document.getElementById('rewindBtn'),
+  forwardBtn: document.getElementById('forwardBtn'),
   curTimeText: document.getElementById('curTimeText'),
   totalTimeText: document.getElementById('totalTimeText'),
   tbar: document.getElementById('tbar'),
@@ -206,7 +215,7 @@ function saveStoredSpeedLimits(minA, maxA) {
         if (el.speedSaveHint) el.speedSaveHint.style.opacity = '0';
       }, 1500);
     }
-  } catch (e) {}
+  } catch (e) { }
 }
 
 function initSpeedLimitsFromStorage() {
@@ -352,6 +361,12 @@ function setupEventListeners() {
 
   // Player controls
   el.playBtn.addEventListener('click', togglePlay);
+  if (el.fsBtn) el.fsBtn.addEventListener('click', toggleFullScreen);
+  if (el.muteBtn) el.muteBtn.addEventListener('click', toggleMute);
+  if (el.pipBtn) el.pipBtn.addEventListener('click', togglePiP);
+  setupSpeedMenu();
+  if (el.rewindBtn) el.rewindBtn.addEventListener('click', () => { el.mainVideo.currentTime = Math.max(0, el.mainVideo.currentTime - 5); });
+  if (el.forwardBtn) el.forwardBtn.addEventListener('click', () => { el.mainVideo.currentTime = Math.min(el.mainVideo.duration || state.totalDuration, el.mainVideo.currentTime + 5); });
   el.tbar.addEventListener('click', handleSeek);
   el.mainVideo.addEventListener('timeupdate', onVideoTimeUpdate);
   el.mainVideo.addEventListener('ended', () => {
@@ -617,7 +632,7 @@ function getStoredGeminiKeys() {
     try {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) return parsed.map(k => k.trim()).filter(Boolean);
-    } catch (e) {}
+    } catch (e) { }
     return raw.replace(/,/g, '\n').split('\n').map(k => k.trim()).filter(Boolean);
   } catch (e) {
     return [];
@@ -672,12 +687,12 @@ function saveGeminiSettings() {
     const cleanKeys = raw.replace(/,/g, '\n').split('\n').map(k => k.trim()).filter(Boolean);
     try {
       localStorage.setItem('gemini_api_keys', JSON.stringify(cleanKeys));
-    } catch (e) {}
+    } catch (e) { }
   }
   if (el.modalGeminiModelSelect) {
     try {
       localStorage.setItem('gemini_model', el.modalGeminiModelSelect.value);
-    } catch (e) {}
+    } catch (e) { }
   }
   updateGeminiKeyCountUI();
   closeGeminiSettingsModal();
@@ -741,7 +756,7 @@ async function updateCacheStatsBadge() {
     if (el.cacheStatsBadge) {
       el.cacheStatsBadge.textContent = `⚡ Bộ nhớ đệm: ${data.total_cached_files} câu (${data.size_mb} MB)`;
     }
-  } catch (e) {}
+  } catch (e) { }
 }
 
 async function checkSubtitlesCache() {
@@ -775,7 +790,7 @@ async function checkSubtitlesCache() {
       }
     }
     updateCacheStatsBadge();
-  } catch (e) {}
+  } catch (e) { }
 }
 
 function openProjectsModal() {
@@ -908,7 +923,7 @@ async function selectProject(projectId) {
     if (data.voice_rate && el.voiceRateSelect) el.voiceRateSelect.value = data.voice_rate;
 
     state.currentJobId = data.project_id || projectId;
-    try { localStorage.setItem('active_dubbing_job_id', state.currentJobId); } catch (e) {}
+    try { localStorage.setItem('active_dubbing_job_id', state.currentJobId); } catch (e) { }
 
     if (data.video_url) {
       loadVideoIntoPlayer(data.video_url);
@@ -1076,8 +1091,8 @@ function renderSubtitleList(subs) {
     div.dataset.end = endSec;
 
     const badgeInfo = getSpeedBadgeInfo(item);
-    const cacheTagHtml = item.has_cache 
-      ? `<span class="sub-cache-tag cached" title="Đã có âm thanh trong Cache (Tải 0s)">⚡ Sẵn sàng</span>` 
+    const cacheTagHtml = item.has_cache
+      ? `<span class="sub-cache-tag cached" title="Đã có âm thanh trong Cache (Tải 0s)">⚡ Sẵn sàng</span>`
       : `<span class="sub-cache-tag missing" title="Chưa tạo âm thanh">⏳ Chưa tạo</span>`;
 
     div.innerHTML = `
@@ -1150,6 +1165,116 @@ function updatePlayButton() {
   }
 }
 
+function toggleFullScreen() {
+  const container = document.querySelector('.video-pane');
+  if (!container) return;
+
+  if (!document.fullscreenElement) {
+    if (container.requestFullscreen) {
+      container.requestFullscreen().catch(console.warn);
+    } else if (container.webkitRequestFullscreen) {
+      container.webkitRequestFullscreen();
+    }
+  } else {
+    if (document.exitFullscreen) {
+      document.exitFullscreen();
+    }
+  }
+}
+
+function toggleMute() {
+  if (!el.mainVideo) return;
+  el.mainVideo.muted = !el.mainVideo.muted;
+  if (!el.mainVideo.muted && el.mainVideo.volume === 0) {
+    el.mainVideo.volume = 1;
+  }
+  updateMuteButton();
+}
+
+function updateMuteButton() {
+  if (!el.muteIcon || !el.mainVideo) return;
+  if (el.mainVideo.muted || el.mainVideo.volume === 0) {
+    el.muteIcon.innerHTML = '<path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/>';
+    if (el.muteBtn) el.muteBtn.title = "Bật âm thanh";
+  } else {
+    el.muteIcon.innerHTML = '<path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/>';
+    if (el.muteBtn) el.muteBtn.title = "Tắt âm thanh";
+  }
+}
+
+async function togglePiP() {
+  if (!el.mainVideo) return;
+  try {
+    if (el.mainVideo !== document.pictureInPictureElement) {
+      await el.mainVideo.requestPictureInPicture();
+    } else {
+      await document.exitPictureInPicture();
+    }
+  } catch (error) {
+    console.warn(`Lỗi mở PiP: ${error.message}`);
+  }
+}
+
+function setupSpeedMenu() {
+  if (!el.speedBtn || !el.speedMenuPopup) return;
+
+  // Toggle speed menu dropdown
+  el.speedBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    el.speedMenuPopup.classList.toggle('show');
+  });
+
+  // Handle option selection
+  el.speedMenuPopup.querySelectorAll('.speed-opt-btn').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const speedVal = parseFloat(btn.dataset.speed) || 1.0;
+      setPlaybackSpeed(speedVal);
+      el.speedMenuPopup.classList.remove('show');
+    });
+  });
+
+  // Close dropdown when clicking outside
+  document.addEventListener('click', (e) => {
+    if (el.speedMenuPopup.classList.contains('show')) {
+      if (!el.speedMenuPopup.contains(e.target) && e.target !== el.speedBtn) {
+        el.speedMenuPopup.classList.remove('show');
+      }
+    }
+  });
+
+  // Close dropdown on Escape key
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && el.speedMenuPopup.classList.contains('show')) {
+      el.speedMenuPopup.classList.remove('show');
+    }
+  });
+}
+
+function setPlaybackSpeed(speed) {
+  if (el.mainVideo) {
+    el.mainVideo.playbackRate = speed;
+  }
+  if (el.speedBtn) {
+    el.speedBtn.textContent = speed === 1 ? '1x' : `${speed}x`;
+    el.speedBtn.title = `Tốc độ phát: ${speed}x`;
+    if (speed !== 1) {
+      el.speedBtn.style.color = 'var(--amber)';
+    } else {
+      el.speedBtn.style.color = 'var(--muted)';
+    }
+  }
+
+  // Update active styling on items in menu
+  if (el.speedMenuPopup) {
+    el.speedMenuPopup.querySelectorAll('.speed-opt-btn').forEach((btn) => {
+      const bSpeed = parseFloat(btn.dataset.speed) || 1.0;
+      btn.classList.toggle('active', Math.abs(bSpeed - speed) < 0.01);
+    });
+  }
+}
+
+
 function handleSeek(e) {
   const rect = el.tbar.getBoundingClientRect();
   const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
@@ -1193,12 +1318,12 @@ function updatePlayerUI() {
     const start = parseFloat(row.dataset.start);
     const end = parseFloat(row.dataset.end);
     const isActive = cur >= start && cur < end;
-    
+
     if (isActive) {
       currentActiveElement = row;
       currentActiveId = row.dataset.idx;
     }
-    
+
     if (row.classList.contains('active') !== isActive) {
       row.classList.toggle('active', isActive);
     }
@@ -1282,7 +1407,7 @@ async function startDubbingProcess() {
     state.currentJobId = data.job_id;
     try {
       localStorage.setItem('active_dubbing_job_id', data.job_id);
-    } catch (e) {}
+    } catch (e) { }
 
     connectWebSocket(data.job_id);
   } catch (err) {
@@ -1311,7 +1436,7 @@ function startJobPolling(jobId) {
           clearInterval(pollIntervalTimer);
         }
       }
-    } catch (e) {}
+    } catch (e) { }
   }, 1500);
 }
 
@@ -1882,14 +2007,14 @@ function checkAndRestoreActiveJob() {
   let savedJobId = null;
   try {
     savedJobId = localStorage.getItem('active_dubbing_job_id');
-  } catch (e) {}
+  } catch (e) { }
   if (!savedJobId) return;
 
   fetch(`/api/job_status/${savedJobId}`)
     .then((r) => (r.ok ? r.json() : null))
     .then((job) => {
       if (!job) {
-        try { localStorage.removeItem('active_dubbing_job_id'); } catch (e) {}
+        try { localStorage.removeItem('active_dubbing_job_id'); } catch (e) { }
         return;
       }
       state.currentJobId = savedJobId;
@@ -1911,7 +2036,7 @@ function checkAndRestoreActiveJob() {
         handleJobUpdate(job);
       }
     })
-    .catch(() => {});
+    .catch(() => { });
 }
 
 function appendLog(text) {
@@ -2187,7 +2312,7 @@ function applySttResultToProject() {
     // 2. Update Dub SRT Info
     state.srtDubPath = currentSttResult.srt_path;
     state.currentJobId = currentSttResult.project_id || currentSttResult.session_id || state.currentJobId;
-    try { localStorage.setItem('active_dubbing_job_id', state.currentJobId); } catch (e) {}
+    try { localStorage.setItem('active_dubbing_job_id', state.currentJobId); } catch (e) { }
 
     if (el.srtDubFileName) {
       el.srtDubFileName.textContent = `✓ ${currentSttResult.srt_filename || 'auto_stt.srt'}`;
