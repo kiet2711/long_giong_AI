@@ -131,6 +131,182 @@ def build_atempo_filter(ratio: float) -> str:
     return ",".join(f"atempo={p:.4f}" for p in parts)
 
 
+def run_ffmpeg_streaming_progress(
+    cmd: List[str],
+    total_duration_sec: float,
+    progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
+    stage: str = "ffmpeg",
+    percent_range: Tuple[float, float] = (0.0, 100.0),
+    check_interval: float = 0.15,
+) -> subprocess.CompletedProcess:
+    """
+    Execute an FFmpeg command with real-time progress streaming via -progress pipe:1.
+    Continuously parses stdout for out_time_us, frame, fps, speed and fires progress_cb
+    with computed percentage, elapsed time, and render metrics.
+    
+    Args:
+        cmd: FFmpeg command list (will have -progress pipe:1 -nostats injected).
+        total_duration_sec: Total expected output duration for percentage calculation.
+        progress_cb: Callback receiving dict with percent, stage, message, data.
+        stage: Stage label string for progress messages.
+        percent_range: Tuple (start_pct, end_pct) mapping 0-100% of this FFmpeg run
+                       onto the overall pipeline percentage range.
+        check_interval: Minimum seconds between progress callbacks to avoid flooding.
+    
+    Returns:
+        subprocess.CompletedProcess-like result with returncode and stderr.
+    """
+    # Inject -progress pipe:1 before the output file (last arg)
+    full_cmd = list(cmd)
+    # Find position before output (last element)
+    output_file = full_cmd[-1]
+    full_cmd = full_cmd[:-1] + ["-progress", "pipe:1", "-nostats", output_file]
+
+    proc = subprocess.Popen(
+        full_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        bufsize=1,
+    )
+
+    pct_start, pct_end = percent_range
+    pct_span = pct_end - pct_start
+    last_cb_time = 0.0
+    cur_data: Dict[str, Any] = {}
+
+    # Read stderr in a background thread to prevent OS pipe buffer deadlock
+    stderr_lines = []
+    def _read_stderr():
+        try:
+            for err_line in proc.stderr:
+                stderr_lines.append(err_line)
+                if len(stderr_lines) > 200:
+                    stderr_lines.pop(0)
+        except Exception:
+            pass
+
+    stderr_thread = threading.Thread(target=_read_stderr)
+    stderr_thread.daemon = True
+    stderr_thread.start()
+
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+
+            if key == "out_time_us":
+                try:
+                    cur_sec = int(value) / 1_000_000.0
+                    cur_data["cur_sec"] = round(cur_sec, 2)
+                    cur_data["total_sec"] = round(total_duration_sec, 2)
+                    if total_duration_sec > 0:
+                        stage_pct = min(100.0, (cur_sec / total_duration_sec) * 100.0)
+                        cur_data["stage_percent"] = round(stage_pct, 1)
+                        overall_pct = pct_start + (stage_pct / 100.0) * pct_span
+                        cur_data["overall_percent"] = round(overall_pct, 1)
+                except (ValueError, ZeroDivisionError):
+                    pass
+            elif key == "frame":
+                try:
+                    cur_data["frame"] = int(value)
+                except ValueError:
+                    pass
+            elif key == "fps":
+                try:
+                    cur_data["fps"] = round(float(value), 1)
+                except ValueError:
+                    pass
+            elif key == "speed":
+                cur_data["speed"] = value.replace("x", "").strip()
+                try:
+                    cur_data["speed_float"] = round(float(cur_data["speed"]), 1)
+                except ValueError:
+                    cur_data["speed_float"] = 0.0
+            elif key == "progress":
+                cur_data["progress_status"] = value  # "continue" or "end"
+
+            # Fire callback at intervals to avoid flooding
+            now = time.time()
+            if progress_cb and (now - last_cb_time) >= check_interval:
+                last_cb_time = now
+                cur_sec_val = cur_data.get("cur_sec", 0)
+                total_sec_val = cur_data.get("total_sec", total_duration_sec)
+                stage_pct_val = cur_data.get("stage_percent", 0)
+                overall_pct_val = cur_data.get("overall_percent", pct_start)
+                speed_val = cur_data.get("speed", "0")
+                fps_val = cur_data.get("fps", 0)
+                frame_val = cur_data.get("frame", 0)
+
+                def _fmt_time(s):
+                    m, sec = divmod(int(s), 60)
+                    h, m = divmod(m, 60)
+                    if h > 0:
+                        return f"{h:d}:{m:02d}:{sec:02d}"
+                    return f"{m:02d}:{sec:02d}"
+
+                time_str = f"{_fmt_time(cur_sec_val)} / {_fmt_time(total_sec_val)}"
+                msg = f"[{stage.upper()}] {time_str} — {stage_pct_val:.0f}% ({speed_val}x)"
+
+                progress_cb({
+                    "percent": round(overall_pct_val, 1),
+                    "stage": stage,
+                    "message": msg,
+                    "data": {
+                        "cur_sec": cur_sec_val,
+                        "total_sec": total_sec_val,
+                        "stage_percent": stage_pct_val,
+                        "frame": frame_val,
+                        "fps": fps_val,
+                        "speed": speed_val,
+                    },
+                })
+
+    except Exception as e:
+        logger.warning(f"FFmpeg progress stream error: {e}")
+
+    try:
+        stderr_thread.join(timeout=2.0)
+    except Exception:
+        pass
+    stderr_output = "".join(stderr_lines)
+
+    proc.wait()
+
+    # Final callback at 100% of this stage
+    if progress_cb:
+        progress_cb({
+            "percent": round(pct_end, 1),
+            "stage": stage,
+            "message": f"[{stage.upper()}] Hoàn tất.",
+            "data": {
+                "cur_sec": round(total_duration_sec, 2),
+                "total_sec": round(total_duration_sec, 2),
+                "stage_percent": 100.0,
+                "frame": cur_data.get("frame", 0),
+                "fps": cur_data.get("fps", 0),
+                "speed": cur_data.get("speed", "0"),
+            },
+        })
+
+    # Create a result-like object
+    class _Result:
+        def __init__(self, rc, err):
+            self.returncode = rc
+            self.stderr = err
+            self.stdout = ""
+    
+    result = _Result(proc.returncode, stderr_output)
+    if proc.returncode != 0:
+        raise RuntimeError(f"FFmpeg failed (exit {proc.returncode}): {stderr_output.strip()[:500]}")
+    return result
+
+
 class FFmpegDubbingEngine:
     """
     Main engine to coordinate AI voice generation with adaptive prosody rate,
@@ -507,14 +683,18 @@ class FFmpegDubbingEngine:
                 )
 
                 completed_auds += 1
-                if completed_auds % 25 == 0 or completed_auds == total_segs:
-                    pct = 55.0 + (completed_auds / max(1, total_segs)) * 25.0
-                    report(
-                        pct,
-                        "audio_render",
-                        f"Đã xử lý âm thanh AI {completed_auds}/{total_segs} [{seg.seg_type.upper()}] ({seg.sync_desc})",
-                        {"seg_id": seg.seg_id, "seg_type": seg.seg_type, "sync_mode": seg.sync_mode},
-                    )
+                pct = 55.0 + (completed_auds / max(1, total_segs)) * 25.0
+                report(
+                    pct,
+                    "audio_render",
+                    f"Đã xử lý âm thanh AI {completed_auds}/{total_segs} [{seg.seg_type.upper()}] ({seg.sync_desc})",
+                    {
+                        "seg_id": seg.seg_id,
+                        "seg_type": seg.seg_type,
+                        "sync_mode": seg.sync_mode,
+                        "stage_percent": round((completed_auds / max(1, total_segs)) * 100.0, 1),
+                    },
+                )
                 return str(out_aud_path)
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(self.num_workers, 32))) as executor:
@@ -541,16 +721,23 @@ class FFmpegDubbingEngine:
                 "-c:a", "pcm_s16le",
                 str(full_voice_path),
             ]
-            subprocess.run(concat_voice_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
+            run_ffmpeg_streaming_progress(
+                cmd=concat_voice_cmd,
+                total_duration_sec=video_meta.duration,
+                progress_cb=progress_cb,
+                stage="concat_audio",
+                percent_range=(80.0, 84.0),
+                check_interval=0.25,
+            )
         else:
-            report(80.0, "concat_audio", "⚡ Tái sử dụng track giọng đọc AI đã ghép nối sẵn...")
+            report(84.0, "concat_audio", "⚡ Tái sử dụng track giọng đọc AI đã ghép nối sẵn...")
 
         # ---------------------------------------------------------------------
         # Step 3.2: Extract & mix background audio track
         # ---------------------------------------------------------------------
         if has_orig_audio:
             vol_pct = int(self.orig_volume * 100)
-            report(85.0, "audio_render", f"Đang đồng bộ hóa track âm thanh nền ({vol_pct}%)...")
+            report(84.0, "mix_audio", f"Đang trích xuất & hạ âm lượng nhạc nền ({vol_pct}%)...")
             bg_audio_path = work_p / "full_bg_audio.wav"
 
             if not (bg_audio_path.exists() and bg_audio_path.stat().st_size > 1000):
@@ -564,9 +751,17 @@ class FFmpegDubbingEngine:
                     "-ac", "2",
                     str(bg_audio_path),
                 ]
-                subprocess.run(extract_bg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
+                run_ffmpeg_streaming_progress(
+                    cmd=extract_bg_cmd,
+                    total_duration_sec=video_meta.duration,
+                    progress_cb=progress_cb,
+                    stage="mix_audio",
+                    percent_range=(84.0, 87.0),
+                    check_interval=0.2,
+                )
 
             # Mix lowered background track + AI voice track
+            report(87.0, "mix_audio", "Đang hòa trộn nhạc nền + giọng đọc AI...")
             mix_cmd = [
                 "ffmpeg", "-y",
                 "-i", str(bg_audio_path),
@@ -577,14 +772,21 @@ class FFmpegDubbingEngine:
                 "-ac", "2",
                 str(full_audio_path),
             ]
-            subprocess.run(mix_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", check=True)
+            run_ffmpeg_streaming_progress(
+                cmd=mix_cmd,
+                total_duration_sec=video_meta.duration,
+                progress_cb=progress_cb,
+                stage="mix_audio",
+                percent_range=(87.0, 92.0),
+                check_interval=0.2,
+            )
         else:
             full_audio_path = full_voice_path
 
         # ---------------------------------------------------------------------
         # Step 4: 100% Lossless Stream Copy (-c:v copy)
         # ---------------------------------------------------------------------
-        report(92.0, "video_render", "⚡ Kích hoạt Siêu Tốc (Lossless Stream Copy - Giữ nguyên 100% Video gốc)...")
+        report(92.0, "video_render", "⚡ Đang ghép Audio vào Video (Lossless Stream Copy - 100% chất lượng gốc)...")
         final_mux_cmd = [
             "ffmpeg", "-y",
             "-i", str(video_p),
@@ -597,9 +799,14 @@ class FFmpegDubbingEngine:
             "-movflags", "+faststart",
             str(out_p),
         ]
-        res = subprocess.run(final_mux_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace")
-        if res.returncode != 0:
-            raise RuntimeError(f"Lossless Stream Copy Mux failed: {res.stderr.strip() or 'Unknown error'}")
+        run_ffmpeg_streaming_progress(
+            cmd=final_mux_cmd,
+            total_duration_sec=video_meta.duration,
+            progress_cb=progress_cb,
+            stage="video_render",
+            percent_range=(92.0, 99.0),
+            check_interval=0.15,
+        )
 
         # Export synchronized SRT file alongside final MP4
         out_srt_p = out_p.with_suffix(".srt")

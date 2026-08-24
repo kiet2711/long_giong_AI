@@ -117,9 +117,20 @@ const el = {
   // Live Render HUD
   renderStatsHud: document.getElementById('renderStatsHud'),
   hudFrames: document.getElementById('hudFrames'),
-  hudFps: document.getElementById('hudFps'),
   hudTime: document.getElementById('hudTime'),
-  hudSlices: document.getElementById('hudSlices'),
+  hudSpeed: document.getElementById('hudSpeed'),
+  hudStagePercent: document.getElementById('hudStagePercent'),
+
+  // Pipeline Stepper
+  stepInit: document.getElementById('step-init'),
+  stepTts: document.getElementById('step-tts'),
+  stepAudio: document.getElementById('step-audio'),
+  stepVideo: document.getElementById('step-video'),
+
+  // Dual Progress Bars
+  overallPctText: document.getElementById('overallPctText'),
+  stagePctText: document.getElementById('stagePctText'),
+  stageProgressBarFill: document.getElementById('stageProgressBarFill'),
 
   // Cache & Projects
   cacheStatsBadge: document.getElementById('cacheStatsBadge'),
@@ -1217,6 +1228,19 @@ async function startDubbingProcess() {
   el.logBox.innerHTML = '';
   el.btnDownloadResult.style.display = 'none';
   if (el.btnDownloadSrt) el.btnDownloadSrt.style.display = 'none';
+  if (el.btnOpenVideo) el.btnOpenVideo.style.display = 'none';
+  if (el.btnOpenFolder) el.btnOpenFolder.style.display = 'none';
+
+  // Reset Pipeline Stepper & Dual Progress Bars
+  lastStepperStage = '';
+  STEPPER_EL_IDS.forEach(id => {
+    if (el[id]) el[id].classList.remove('active', 'done');
+  });
+  if (el.overallPctText) el.overallPctText.textContent = '0%';
+  if (el.stageProgressBarFill) el.stageProgressBarFill.style.width = '0%';
+  if (el.stagePctText) el.stagePctText.textContent = '0%';
+  if (el.renderStatsHud) el.renderStatsHud.style.display = 'none';
+  if (el.failedReviewContainer) el.failedReviewContainer.style.display = 'none';
 
   if (el.floatingJobPill) {
     el.floatingJobPill.classList.remove('completed');
@@ -1274,13 +1298,62 @@ function startJobPolling(jobId) {
 
 let lastLoggedMessage = '';
 
+// --- Pipeline Stepper Logic ---
+const STEPPER_STAGES = {
+  // stage name -> step index (0=init, 1=tts, 2=audio, 3=video)
+  'starting': 0, 'init': 0,
+  'tts': 1, 'tts_needs_review': 1,
+  'audio_render': 2, 'concat_audio': 2, 'mix_audio': 2,
+  'video_render': 3,
+  'completed': 4, 'failed': -1,
+};
+const STEPPER_EL_IDS = ['stepInit', 'stepTts', 'stepAudio', 'stepVideo'];
+let lastStepperStage = '';
+
+function updatePipelineStepper(stage) {
+  if (!stage || stage === lastStepperStage) return;
+  lastStepperStage = stage;
+
+  const activeIdx = STEPPER_STAGES[stage];
+  if (activeIdx === undefined) return;
+
+  STEPPER_EL_IDS.forEach((elId, idx) => {
+    const stepEl = el[elId];
+    if (!stepEl) return;
+    stepEl.classList.remove('active', 'done');
+    if (activeIdx === 4) {
+      // All completed
+      stepEl.classList.add('done');
+    } else if (idx < activeIdx) {
+      stepEl.classList.add('done');
+    } else if (idx === activeIdx) {
+      stepEl.classList.add('active');
+    }
+  });
+
+  // Reset stage sub-progress bar when switching stages
+  if (el.stageProgressBarFill) el.stageProgressBarFill.style.width = '0%';
+  if (el.stagePctText) el.stagePctText.textContent = '0%';
+}
+
 function handleJobUpdate(msg) {
   if (!msg) return;
 
+  // --- Overall Progress Bar ---
   if (msg.percent !== undefined) {
     el.progressBarFill.style.width = `${msg.percent}%`;
+    if (el.overallPctText) el.overallPctText.textContent = `${Math.round(msg.percent)}%`;
     if (el.floatingJobPct) el.floatingJobPct.textContent = `${Math.round(msg.percent)}%`;
   }
+
+  // --- Stage Sub-Progress Bar ---
+  if (msg.data && msg.data.stage_percent !== undefined) {
+    const stagePct = Math.round(msg.data.stage_percent);
+    if (el.stageProgressBarFill) el.stageProgressBarFill.style.width = `${stagePct}%`;
+    if (el.stagePctText) el.stagePctText.textContent = `${stagePct}%`;
+  }
+
+  // --- Status Message ---
   if (msg.message) {
     el.statusMsg.textContent = msg.message;
     if (el.floatingJobTitle) el.floatingJobTitle.textContent = msg.message;
@@ -1290,20 +1363,24 @@ function handleJobUpdate(msg) {
     }
   }
 
-  // Live update HUD in Video Render Stage
-  if (msg.stage === 'video_render' && msg.data) {
+  // --- Pipeline Stepper Update ---
+  updatePipelineStepper(msg.stage || msg.status);
+
+  // --- Live Render Stats HUD (shown during audio + video FFmpeg stages) ---
+  const hudStages = ['audio_render', 'concat_audio', 'mix_audio', 'video_render'];
+  if (hudStages.includes(msg.stage) && msg.data) {
     if (el.renderStatsHud) el.renderStatsHud.style.display = 'flex';
-    if (el.hudFrames && msg.data.frame) {
+    if (el.hudFrames && msg.data.frame !== undefined) {
       el.hudFrames.textContent = parseInt(msg.data.frame, 10).toLocaleString();
     }
-    if (el.hudFps && msg.data.fps) {
-      el.hudFps.textContent = `${msg.data.fps} fps`;
+    if (el.hudSpeed && msg.data.speed !== undefined) {
+      el.hudSpeed.textContent = `${msg.data.speed}x`;
     }
     if (el.hudTime && msg.data.cur_sec !== undefined && msg.data.total_sec !== undefined) {
       el.hudTime.textContent = `${fmtTime(msg.data.cur_sec)} / ${fmtTime(msg.data.total_sec)}`;
     }
-    if (el.hudSlices && msg.data.total_slices) {
-      el.hudSlices.textContent = `${msg.data.total_slices.toLocaleString()} dải`;
+    if (el.hudStagePercent && msg.data.stage_percent !== undefined) {
+      el.hudStagePercent.textContent = `${Math.round(msg.data.stage_percent)}%`;
     }
   } else if (msg.stage === 'completed' || msg.status === 'completed') {
     if (el.renderStatsHud) el.renderStatsHud.style.display = 'none';

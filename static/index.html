@@ -411,23 +411,61 @@
 
   <!-- MODAL PROGRESS OVERLAY -->
   <div class="modal-backdrop" id="modalBackdrop">
-    <div class="modal-box">
+    <div class="modal-box" style="max-width: 600px;">
       <div class="modal-header">
         <div class="modal-title" id="modalTitle">Đang xử lý lồng tiếng...</div>
       </div>
       
-      <div class="progress-bar-container">
-        <div class="progress-bar-fill" id="progressBarFill"></div>
+      <!-- PIPELINE STEPPER -->
+      <div class="pipeline-stepper" id="pipelineStepper">
+        <div class="step-item" data-step="init" id="step-init">
+          <div class="step-icon">📄</div>
+          <div class="step-label">Chuẩn bị</div>
+          <div class="step-line"></div>
+        </div>
+        <div class="step-item" data-step="tts" id="step-tts">
+          <div class="step-icon">🎙️</div>
+          <div class="step-label">Tạo giọng AI</div>
+          <div class="step-line"></div>
+        </div>
+        <div class="step-item" data-step="audio" id="step-audio">
+          <div class="step-icon">🎵</div>
+          <div class="step-label">Ghép Audio</div>
+          <div class="step-line"></div>
+        </div>
+        <div class="step-item" data-step="video" id="step-video">
+          <div class="step-icon">🎬</div>
+          <div class="step-label">Ghép Video</div>
+        </div>
+      </div>
+
+      <!-- DUAL PROGRESS BARS -->
+      <div class="dual-progress-section">
+        <div class="progress-row">
+          <span class="progress-label">Tổng thể</span>
+          <span class="progress-pct" id="overallPctText">0%</span>
+        </div>
+        <div class="progress-bar-container" style="height: 12px; margin: 4px 0 10px;">
+          <div class="progress-bar-fill" id="progressBarFill"></div>
+        </div>
+
+        <div class="progress-row">
+          <span class="progress-label" style="color: #93C5FD;">Công đoạn hiện tại</span>
+          <span class="progress-pct" id="stagePctText" style="color: #60A5FA;">0%</span>
+        </div>
+        <div class="progress-bar-container stage-bar" style="height: 8px; margin: 4px 0 8px;">
+          <div class="progress-bar-fill stage-bar-fill" id="stageProgressBarFill"></div>
+        </div>
       </div>
       
       <div class="status-msg" id="statusMsg">Đang chuẩn bị các tiến trình FFmpeg...</div>
       
       <!-- LIVE RENDER STATS HUD -->
       <div class="render-stats-hud" id="renderStatsHud" style="display: none;">
-        <div class="stat-pill"><span class="stat-label">Khung hình:</span> <b id="hudFrames">0</b></div>
-        <div class="stat-pill"><span class="stat-label">Tốc độ:</span> <b id="hudFps">0 fps</b></div>
-        <div class="stat-pill"><span class="stat-label">Thời gian:</span> <b id="hudTime">00:00 / 00:00</b></div>
-        <div class="stat-pill"><span class="stat-label">Dải video:</span> <b id="hudSlices">0 dải</b></div>
+        <div class="stat-pill"><span class="stat-label">⏱️ Thời lượng:</span> <b id="hudTime">00:00 / 00:00</b></div>
+        <div class="stat-pill"><span class="stat-label">⚡ Tốc độ:</span> <b id="hudSpeed">0x</b></div>
+        <div class="stat-pill"><span class="stat-label">🎞️ Khung hình:</span> <b id="hudFrames">0</b></div>
+        <div class="stat-pill"><span class="stat-label">📈 Bước:</span> <b id="hudStagePercent">0%</b></div>
       </div>
       
       <div class="log-box" id="logBox"></div>
