@@ -1186,12 +1186,31 @@ function updatePlayerUI() {
     el.captionBox.style.display = 'none';
   }
 
+  let currentActiveElement = null;
+  let currentActiveId = null;
+
   document.querySelectorAll('.srt-line').forEach((row) => {
     const start = parseFloat(row.dataset.start);
     const end = parseFloat(row.dataset.end);
     const isActive = cur >= start && cur < end;
-    row.classList.toggle('active', isActive);
+    
+    if (isActive) {
+      currentActiveElement = row;
+      currentActiveId = row.dataset.idx;
+    }
+    
+    if (row.classList.contains('active') !== isActive) {
+      row.classList.toggle('active', isActive);
+    }
   });
+
+  // Tự động cuộn đến phụ đề hiện tại
+  if (currentActiveElement && state.lastActiveSubId !== currentActiveId) {
+    state.lastActiveSubId = currentActiveId;
+    currentActiveElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } else if (!currentActiveElement && state.lastActiveSubId !== null) {
+    state.lastActiveSubId = null;
+  }
 }
 
 // --- Start Full Dubbing Process ---
