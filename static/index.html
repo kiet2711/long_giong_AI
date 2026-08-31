@@ -317,6 +317,37 @@
             </label>
           </div>
 
+          <!-- Original Video Audio Mode Selector -->
+          <div class="slider-group" style="margin-top: 10px;">
+            <div class="slider-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+              <label style="display: flex; align-items: center; gap: 5px; margin-bottom: 0;">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--amber)" stroke-width="2">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                  <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+                </svg>
+                Tiếng Video Gốc (Original Audio)
+              </label>
+              <span id="origAudioQuickBadge" class="slider-badge badge-amber">15% (Nhạc nền)</span>
+            </div>
+            <div class="orig-audio-mode-selector">
+              <button type="button" class="orig-audio-btn" data-val="0" id="btnOrigMute" title="Tắt hoàn toàn âm thanh của video gốc, chỉ giữ giọng lồng tiếng AI">
+                <span class="btn-icon">🔇</span>
+                <span class="btn-title">Tắt tiếng gốc</span>
+                <span class="btn-sub">0% (Chỉ lấy AI)</span>
+              </button>
+              <button type="button" class="orig-audio-btn active" data-val="15" id="btnOrigBg" title="Hạ nhỏ âm lượng video gốc làm nhạc nền nhẹ phía dưới">
+                <span class="btn-icon">🎵</span>
+                <span class="btn-title">Nhạc nền nhỏ</span>
+                <span class="btn-sub">15% (Khuyên dùng)</span>
+              </button>
+              <button type="button" class="orig-audio-btn" data-val="100" id="btnOrigKeep" title="Giữ nguyên 100% âm lượng gốc của video hòa trộn với giọng AI">
+                <span class="btn-icon">🔊</span>
+                <span class="btn-title">Giữ nguyên tiếng</span>
+                <span class="btn-sub">100% (Gốc toàn bộ)</span>
+              </button>
+            </div>
+          </div>
+
           <!-- Threads Slider -->
           <div class="slider-group" style="margin-top: 10px;">
             <div class="slider-header">
@@ -325,6 +356,58 @@
             </div>
             <input type="range" id="threadsSlider" class="slider-input slider-teal" min="1" max="200" value="50"
               step="1">
+          </div>
+
+          <!-- Subtitle output controls -->
+          <div class="subtitle-output-settings">
+            <div class="subtitle-output-title">Phụ đề trên video xuất</div>
+            <label class="toggle-setting">
+              <span>
+                <strong>Che phụ đề cũ</strong>
+                <small>Phủ vùng đáy video bằng lớp làm mờ trước khi chèn phụ đề mới.</small>
+              </span>
+              <input type="checkbox" id="subtitleOverlayEnabled" checked>
+              <i aria-hidden="true"></i>
+            </label>
+            <label class="toggle-setting">
+              <span>
+                <strong>Render phụ đề vào video</strong>
+                <small>Gắn cứng phụ đề lồng tiếng vào file MP4 thành phẩm.</small>
+              </span>
+              <input type="checkbox" id="burnSubtitlesEnabled" checked>
+              <i aria-hidden="true"></i>
+            </label>
+            <div class="slider-group subtitle-position-setting">
+              <div class="slider-header">
+                <label for="subtitlePositionSlider">Vị trí phụ đề (từ đáy video)</label>
+                <span id="subtitlePositionBadge" class="slider-badge badge-teal">8%</span>
+              </div>
+              <input type="range" id="subtitlePositionSlider" class="slider-input slider-teal" min="3" max="45" value="8" step="1">
+              <div class="subtitle-position-hint">Kéo sang phải để đưa phụ đề lên cao hơn.</div>
+            </div>
+            <div class="subtitle-editor-grid">
+              <div class="slider-group">
+                <div class="slider-header"><label>Cỡ chữ phụ đề</label><span id="subtitleFontSizeBadge" class="slider-badge badge-teal">22</span></div>
+                <input type="range" id="subtitleFontSizeSlider" class="slider-input slider-teal" min="14" max="48" value="22" step="1">
+              </div>
+            </div>
+            <div class="subtitle-style-row">
+              <label for="subtitleColorSelect">Màu chữ</label>
+              <select id="subtitleColorSelect">
+                <option value="white" selected>Trắng</option>
+                <option value="yellow">Vàng</option>
+                <option value="cyan">Xanh ngọc</option>
+              </select>
+              <label for="subtitleOutlineSlider">Viền</label>
+              <input type="range" id="subtitleOutlineSlider" min="0" max="5" value="2" step="1">
+              <span id="subtitleOutlineBadge">2px</span>
+            </div>
+            <div class="mask-layer-actions">
+              <button type="button" class="btn btn-outline btn-sm" id="btnAddMaskLayer">+ Thêm lớp che</button>
+              <span>Kéo trực tiếp từng vùng trên video để di chuyển.</span>
+            </div>
+            <div class="mask-layer-list" id="maskLayerList"></div>
+            <div class="subtitle-editor-tip">Mẹo: kéo trực tiếp từng lớp che trên video để di chuyển. Mỗi lớp có thông số riêng.</div>
           </div>
 
           <div class="form-group" style="margin-top: 14px;">
@@ -380,6 +463,7 @@
               <div class="caption" id="captionBox" style="display:none;">
                 <span id="captionText"></span>
               </div>
+              <div class="subtitle-mask-layers" id="subtitleMaskLayers" aria-hidden="true"></div>
             </div>
 
             <div class="transport">

@@ -324,6 +324,16 @@ class FFmpegDubbingEngine:
         orig_volume: float = 0.15,
         dub_volume: float = 1.20,
         num_workers: int = 50,
+        subtitle_overlay_enabled: bool = True,
+        burn_subtitles_enabled: bool = True,
+        subtitle_position_percent: int = 8,
+        subtitle_mask_height_percent: int = 28,
+        subtitle_mask_opacity: float = 0.38,
+        subtitle_mask_blur: int = 12,
+        subtitle_font_size: int = 22,
+        subtitle_color: str = "white",
+        subtitle_outline: int = 2,
+        subtitle_masks: Optional[List[Dict[str, Any]]] = None,
         **kwargs,
     ):
         self.tts_client = tts_client or CapCutTTSClient()
@@ -335,6 +345,20 @@ class FFmpegDubbingEngine:
         self.orig_volume = orig_volume
         self.dub_volume = dub_volume
         self.num_workers = num_workers
+        self.subtitle_overlay_enabled = subtitle_overlay_enabled
+        self.burn_subtitles_enabled = burn_subtitles_enabled
+        self.subtitle_position_percent = max(3, min(45, int(subtitle_position_percent)))
+        self.subtitle_mask_height_percent = max(12, min(55, int(subtitle_mask_height_percent)))
+        self.subtitle_mask_opacity = max(0.0, min(0.90, float(subtitle_mask_opacity)))
+        self.subtitle_mask_blur = max(0, min(30, int(subtitle_mask_blur)))
+        self.subtitle_font_size = max(14, min(48, int(subtitle_font_size)))
+        self.subtitle_color = subtitle_color if subtitle_color in {"white", "yellow", "cyan"} else "white"
+        self.subtitle_outline = max(0, min(5, int(subtitle_outline)))
+        self.subtitle_masks = subtitle_masks or [{
+            "x": 0, "y": 100 - self.subtitle_mask_height_percent, "width": 100,
+            "height": self.subtitle_mask_height_percent, "opacity": self.subtitle_mask_opacity,
+            "blur": self.subtitle_mask_blur,
+        }]
 
     def process_dubbing_pipeline(
         self,
@@ -784,21 +808,70 @@ class FFmpegDubbingEngine:
             full_audio_path = full_voice_path
 
         # ---------------------------------------------------------------------
-        # Step 4: 100% Lossless Stream Copy (-c:v copy)
+        # Step 4: retain stream copy without visual edits; otherwise burn the subtitle track.
         # ---------------------------------------------------------------------
-        report(92.0, "video_render", "⚡ Đang ghép Audio vào Video (Lossless Stream Copy - 100% chất lượng gốc)...")
-        final_mux_cmd = [
-            "ffmpeg", "-y",
-            "-i", str(video_p),
-            "-i", str(full_audio_path),
-            "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-movflags", "+faststart",
-            str(out_p),
-        ]
+        visual_render = self.burn_subtitles_enabled or self.subtitle_overlay_enabled
+        if visual_render:
+            out_srt_p = out_p.with_suffix(".srt")
+            SRTParser.export_synced_srt(timeline_segs, out_srt_p)
+            subtitle_path = out_srt_p.resolve().as_posix().replace(":", r"\:").replace("'", r"\'")
+            margin_v = max(12, int(video_meta.height * self.subtitle_position_percent / 100))
+            mask_height = self.subtitle_mask_height_percent / 100
+            mask_y = 1 - mask_height
+            subtitle_colors = {
+                "white": "&H00FFFFFF",
+                "yellow": "&H0000EFFF",
+                "cyan": "&HE4F47200",
+            }
+            style = (
+                f"FontName=Arial,FontSize={self.subtitle_font_size},PrimaryColour={subtitle_colors[self.subtitle_color]},"
+                "OutlineColour=&H90000000,BorderStyle=1,Shadow=1,Alignment=2,"
+                f"Outline={self.subtitle_outline},MarginV={margin_v}"
+            )
+            if self.subtitle_overlay_enabled:
+                filter_parts = ["[0:v]null[v0]"]
+                previous = "v0"
+                for index, raw_mask in enumerate(self.subtitle_masks):
+                    x = max(0.0, min(100.0, float(raw_mask.get("x", 0)))) / 100
+                    y = max(0.0, min(100.0, float(raw_mask.get("y", 72)))) / 100
+                    width = max(1.0, min(100.0 - (x * 100), float(raw_mask.get("width", 100)))) / 100
+                    height = max(1.0, min(100.0 - (y * 100), float(raw_mask.get("height", 28)))) / 100
+                    opacity = max(0.0, min(0.9, float(raw_mask.get("opacity", self.subtitle_mask_opacity))))
+                    blur = max(0, min(30, int(raw_mask.get("blur", self.subtitle_mask_blur))))
+                    filter_parts.append(
+                        f"[{previous}]split=2[base{index}][src{index}]"
+                    )
+                    filter_parts.append(
+                        f"[src{index}]crop=trunc(iw*{width:.4f}):trunc(ih*{height:.4f}):trunc(iw*{x:.4f}):trunc(ih*{y:.4f}),boxblur={blur}:2[blur{index}]"
+                    )
+                    output = "covered" if index == len(self.subtitle_masks) - 1 else f"v{index + 1}"
+                    filter_parts.append(
+                        f"[base{index}][blur{index}]overlay=trunc(W*{x:.4f}):trunc(H*{y:.4f}),drawbox=x=trunc(iw*{x:.4f}):y=trunc(ih*{y:.4f}):w=trunc(iw*{width:.4f}):h=trunc(ih*{height:.4f}):color=black@{opacity:.2f}:t=fill[{output}]"
+                    )
+                    previous = output
+                filter_complex = ";".join(filter_parts) + ";"
+                video_input = "[covered]"
+            else:
+                filter_complex = ""
+                video_input = "[0:v]"
+            if self.burn_subtitles_enabled:
+                filter_complex += f"{video_input}subtitles=filename='{subtitle_path}':charenc=UTF-8:force_style='{style}'[vout]"
+            else:
+                filter_complex += f"{video_input}null[vout]"
+            report(92.0, "video_render", "Đang che phụ đề cũ và render phụ đề mới vào video...")
+            final_mux_cmd = [
+                "ffmpeg", "-y", "-i", str(video_p), "-i", str(full_audio_path),
+                "-filter_complex", filter_complex, "-map", "[vout]", "-map", "1:a:0",
+                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out_p),
+            ]
+        else:
+            report(92.0, "video_render", "⚡ Đang ghép Audio vào Video (Lossless Stream Copy - 100% chất lượng gốc)...")
+            final_mux_cmd = [
+                "ffmpeg", "-y", "-i", str(video_p), "-i", str(full_audio_path),
+                "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out_p),
+            ]
         run_ffmpeg_streaming_progress(
             cmd=final_mux_cmd,
             total_duration_sec=video_meta.duration,

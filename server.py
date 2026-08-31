@@ -572,6 +572,15 @@ async def get_stt_status(task_id: str):
     }
 
 
+class SubtitleMaskConfig(BaseModel):
+    x: float = 0
+    y: float = 72
+    width: float = 100
+    height: float = 28
+    opacity: float = 0.38
+    blur: int = 12
+
+
 class StartDubbingRequest(BaseModel):
     video_path: str
     srt_dub_path: str
@@ -590,6 +599,16 @@ class StartDubbingRequest(BaseModel):
     orig_volume: Optional[float] = 0.15
     dub_volume: Optional[float] = 1.20
     num_workers: Optional[int] = 50
+    subtitle_overlay_enabled: Optional[bool] = True
+    burn_subtitles_enabled: Optional[bool] = True
+    subtitle_position_percent: Optional[int] = 8
+    subtitle_mask_height_percent: Optional[int] = 28
+    subtitle_mask_opacity: Optional[float] = 0.38
+    subtitle_mask_blur: Optional[int] = 12
+    subtitle_font_size: Optional[int] = 22
+    subtitle_color: Optional[str] = "white"
+    subtitle_outline: Optional[int] = 2
+    subtitle_masks: Optional[List[SubtitleMaskConfig]] = None
 
 
 @app.post("/api/start_dubbing")
@@ -642,6 +661,16 @@ async def start_dubbing(req: StartDubbingRequest):
                 orig_volume=req.orig_volume if req.orig_volume is not None else 0.15,
                 dub_volume=req.dub_volume if req.dub_volume is not None else 1.20,
                 num_workers=req.num_workers if req.num_workers is not None else 50,
+                subtitle_overlay_enabled=req.subtitle_overlay_enabled if req.subtitle_overlay_enabled is not None else True,
+                burn_subtitles_enabled=req.burn_subtitles_enabled if req.burn_subtitles_enabled is not None else True,
+                subtitle_position_percent=req.subtitle_position_percent if req.subtitle_position_percent is not None else 8,
+                subtitle_mask_height_percent=req.subtitle_mask_height_percent if req.subtitle_mask_height_percent is not None else 28,
+                subtitle_mask_opacity=req.subtitle_mask_opacity if req.subtitle_mask_opacity is not None else 0.38,
+                subtitle_mask_blur=req.subtitle_mask_blur if req.subtitle_mask_blur is not None else 12,
+                subtitle_font_size=req.subtitle_font_size if req.subtitle_font_size is not None else 22,
+                subtitle_color=req.subtitle_color or "white",
+                subtitle_outline=req.subtitle_outline if req.subtitle_outline is not None else 2,
+                subtitle_masks=[mask.model_dump() for mask in req.subtitle_masks] if req.subtitle_masks else None,
             )
 
 

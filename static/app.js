@@ -18,6 +18,17 @@ const state = {
   currentTime: 0.0,
   totalDuration: 18.0,
   previewAudio: new Audio(),
+  subtitleOverlayEnabled: true,
+  burnSubtitlesEnabled: true,
+  subtitlePosition: 8,
+  maskHeight: 28,
+  maskOpacity: 38,
+  maskBlur: 12,
+  subtitleFontSize: 22,
+  subtitleColor: 'white',
+  subtitleOutline: 2,
+  maskLayers: [{ id: 1, x: 0, y: 72, width: 100, height: 28, opacity: 38, blur: 12 }],
+  activeMaskLayerId: 1,
 };
 
 // DOM Elements
@@ -46,11 +57,26 @@ const el = {
   useAdaptiveProsodyCheckbox: document.getElementById('useAdaptiveProsodyCheckbox'),
   origVolSlider: document.getElementById('origVolSlider'),
   origVolBadge: document.getElementById('origVolBadge'),
+  origAudioQuickBadge: document.getElementById('origAudioQuickBadge'),
   dubVolSlider: document.getElementById('dubVolSlider'),
   dubVolBadge: document.getElementById('dubVolBadge'),
   threadsSlider: document.getElementById('threadsSlider'),
   threadsValue: document.getElementById('threadsValue'),
   btnStartDubbing: document.getElementById('btnStartDubbing'),
+  subtitleOverlayEnabled: document.getElementById('subtitleOverlayEnabled'),
+  burnSubtitlesEnabled: document.getElementById('burnSubtitlesEnabled'),
+  subtitlePositionSlider: document.getElementById('subtitlePositionSlider'),
+  subtitlePositionBadge: document.getElementById('subtitlePositionBadge'),
+  subtitleMaskPreview: document.getElementById('subtitleMaskPreview'),
+  subtitleMaskResizeHandle: document.getElementById('subtitleMaskResizeHandle'),
+  subtitleFontSizeSlider: document.getElementById('subtitleFontSizeSlider'),
+  subtitleFontSizeBadge: document.getElementById('subtitleFontSizeBadge'),
+  subtitleColorSelect: document.getElementById('subtitleColorSelect'),
+  subtitleOutlineSlider: document.getElementById('subtitleOutlineSlider'),
+  subtitleOutlineBadge: document.getElementById('subtitleOutlineBadge'),
+  subtitleMaskLayers: document.getElementById('subtitleMaskLayers'),
+  maskLayerList: document.getElementById('maskLayerList'),
+  btnAddMaskLayer: document.getElementById('btnAddMaskLayer'),
 
   // Gemini AI Settings & Key Pool
   btnHeaderGeminiSettings: document.getElementById('btnHeaderGeminiSettings'),
@@ -180,7 +206,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupEventListeners();
   setupSttEventListeners();
   loadSampleMockData();
-  updateOrigVolUI();
+  initOrigVolFromStorage();
   updateDubVolUI();
   initSpeedLimitsFromStorage();
   updateGapBorrowUI();
@@ -188,6 +214,16 @@ document.addEventListener('DOMContentLoaded', () => {
   updateGeminiKeyCountUI();
   checkAndRestoreActiveJob();
 });
+
+function initOrigVolFromStorage() {
+  try {
+    const saved = localStorage.getItem('user_orig_volume');
+    if (saved !== null && !isNaN(parseInt(saved, 10)) && el.origVolSlider) {
+      el.origVolSlider.value = parseInt(saved, 10);
+    }
+  } catch (e) { }
+  updateOrigVolUI(false);
+}
 
 
 function getStoredSpeedLimits() {
@@ -279,16 +315,50 @@ function updateGapBorrowUI() {
 }
 
 
-function updateOrigVolUI() {
-  if (!el.origVolSlider || !el.origVolBadge) return;
+function updateOrigVolUI(shouldSave = true) {
+  if (!el.origVolSlider) return;
   const val = parseInt(el.origVolSlider.value, 10);
   let desc = `${val}%`;
-  if (val === 0) desc = '0% (Tắt tiếng gốc)';
-  else if (val <= 20) desc = `${val}% (Nền nhỏ)`;
-  else if (val <= 60) desc = `${val}% (Nền vừa)`;
-  else if (val === 100) desc = '100% (Gốc 100%)';
-  else desc = `${val}% (Khuếch đại)`;
-  el.origVolBadge.textContent = desc;
+  let quickDesc = `${val}%`;
+  if (val === 0) {
+    desc = '0% (Tắt tiếng gốc)';
+    quickDesc = '0% (Tắt tiếng)';
+  } else if (val <= 20) {
+    desc = `${val}% (Nền nhỏ)`;
+    quickDesc = `${val}% (Nhạc nền)`;
+  } else if (val <= 60) {
+    desc = `${val}% (Nền vừa)`;
+    quickDesc = `${val}% (Nền vừa)`;
+  } else if (val === 100) {
+    desc = '100% (Gốc 100%)';
+    quickDesc = '100% (Gốc 100%)';
+  } else {
+    desc = `${val}% (Khuếch đại)`;
+    quickDesc = `${val}% (Khuếch đại)`;
+  }
+
+  if (el.origVolBadge) el.origVolBadge.textContent = desc;
+  if (el.origAudioQuickBadge) el.origAudioQuickBadge.textContent = quickDesc;
+
+  // Update active state on original audio selector buttons
+  document.querySelectorAll('.orig-audio-btn').forEach((btn) => {
+    const bVal = parseInt(btn.dataset.val, 10);
+    if (val === 0 && bVal === 0) {
+      btn.classList.add('active');
+    } else if (val > 0 && val <= 35 && bVal === 15) {
+      btn.classList.add('active');
+    } else if (val >= 80 && bVal === 100) {
+      btn.classList.add('active');
+    } else {
+      btn.classList.remove('active');
+    }
+  });
+
+  if (shouldSave) {
+    try {
+      localStorage.setItem('user_orig_volume', val.toString());
+    } catch (e) { }
+  }
 }
 
 function updateDubVolUI() {
@@ -381,6 +451,15 @@ function setupEventListeners() {
   if (el.dubVolSlider) {
     el.dubVolSlider.addEventListener('input', updateDubVolUI);
   }
+  if (el.subtitleOverlayEnabled) el.subtitleOverlayEnabled.addEventListener('change', updateSubtitleOutputUI);
+  if (el.burnSubtitlesEnabled) el.burnSubtitlesEnabled.addEventListener('change', updateSubtitleOutputUI);
+  if (el.subtitlePositionSlider) el.subtitlePositionSlider.addEventListener('input', updateSubtitleOutputUI);
+  [el.subtitleFontSizeSlider, el.subtitleOutlineSlider]
+    .filter(Boolean).forEach((input) => input.addEventListener('input', updateSubtitleOutputUI));
+  if (el.subtitleColorSelect) el.subtitleColorSelect.addEventListener('change', updateSubtitleOutputUI);
+  if (el.btnAddMaskLayer) el.btnAddMaskLayer.addEventListener('click', addMaskLayer);
+  setupDirectSubtitleEditor();
+  updateSubtitleOutputUI();
 
   // Dual Range Slider 1: Audio Speed
   if (el.minAudioSpeedSlider && el.maxAudioSpeedSlider) {
@@ -465,6 +544,17 @@ function setupEventListeners() {
         el.gapBorrowSlider.value = btn.dataset.val;
         updateGapBorrowUI();
         if (state.subtitles.length > 0) renderSubtitleList(state.subtitles);
+      }
+    });
+  });
+
+  // Original Audio Mode Buttons (Quick selector)
+  document.querySelectorAll('.orig-audio-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const val = parseInt(btn.dataset.val, 10);
+      if (el.origVolSlider) {
+        el.origVolSlider.value = val;
+        updateOrigVolUI();
       }
     });
   });
@@ -1304,7 +1394,7 @@ function updatePlayerUI() {
   const cur = state.currentTime;
   const activeSub = state.subtitles.find((s) => cur >= s.start_sec && cur < s.end_sec);
 
-  if (activeSub) {
+  if (activeSub && state.burnSubtitlesEnabled) {
     el.captionBox.style.display = 'block';
     el.captionText.textContent = activeSub.text_dub;
   } else {
@@ -1338,6 +1428,151 @@ function updatePlayerUI() {
   }
 }
 
+function updateSubtitleOutputUI() {
+  state.subtitleOverlayEnabled = el.subtitleOverlayEnabled ? el.subtitleOverlayEnabled.checked : true;
+  state.burnSubtitlesEnabled = el.burnSubtitlesEnabled ? el.burnSubtitlesEnabled.checked : true;
+  state.subtitlePosition = el.subtitlePositionSlider ? parseInt(el.subtitlePositionSlider.value, 10) : 8;
+  syncLegacyPrimaryMaskState();
+  state.subtitleFontSize = el.subtitleFontSizeSlider ? parseInt(el.subtitleFontSizeSlider.value, 10) : 22;
+  state.subtitleColor = el.subtitleColorSelect ? el.subtitleColorSelect.value : 'white';
+  state.subtitleOutline = el.subtitleOutlineSlider ? parseInt(el.subtitleOutlineSlider.value, 10) : 2;
+  if (el.subtitlePositionBadge) el.subtitlePositionBadge.textContent = `${state.subtitlePosition}%`;
+  if (el.subtitleFontSizeBadge) el.subtitleFontSizeBadge.textContent = state.subtitleFontSize;
+  if (el.subtitleOutlineBadge) el.subtitleOutlineBadge.textContent = `${state.subtitleOutline}px`;
+  renderMaskLayersPreview();
+  renderMaskLayerList();
+  if (el.captionBox) {
+    const colorMap = { white: '#ffffff', yellow: '#ffe36d', cyan: '#72f4e4' };
+    el.captionBox.style.bottom = `${state.subtitlePosition}%`;
+    el.captionBox.style.fontSize = `${state.subtitleFontSize}px`;
+    el.captionBox.style.setProperty('--caption-color', colorMap[state.subtitleColor] || '#ffffff');
+    el.captionBox.style.setProperty('--caption-outline', `${state.subtitleOutline}px`);
+  }
+  updatePlayerUI();
+}
+
+function syncLegacyPrimaryMaskState() {
+  const primaryMask = state.maskLayers[0];
+  if (!primaryMask) return;
+  state.maskHeight = primaryMask.height;
+  state.maskOpacity = primaryMask.opacity;
+  state.maskBlur = primaryMask.blur;
+}
+
+function addMaskLayer() {
+  const id = Date.now();
+  state.maskLayers.push({ id, x: 12, y: 18, width: 76, height: 18, opacity: 45, blur: 12 });
+  state.activeMaskLayerId = id;
+  updateSubtitleOutputUI();
+}
+
+function removeMaskLayer(id) {
+  if (state.maskLayers.length <= 1) return;
+  state.maskLayers = state.maskLayers.filter((layer) => layer.id !== id);
+  state.activeMaskLayerId = state.maskLayers[0]?.id || null;
+  updateSubtitleOutputUI();
+}
+
+function renderMaskLayersPreview() {
+  if (!el.subtitleMaskLayers) return;
+  el.subtitleMaskLayers.innerHTML = '';
+  if (!state.subtitleOverlayEnabled) return;
+  state.maskLayers.forEach((layer, index) => {
+    const node = document.createElement('div');
+    node.className = `subtitle-mask-layer${layer.id === state.activeMaskLayerId ? ' active' : ''}`;
+    node.dataset.maskId = layer.id;
+    node.title = `Lớp che ${index + 1}: kéo để di chuyển`;
+    node.style.left = `${layer.x}%`;
+    node.style.top = `${layer.y}%`;
+    node.style.width = `${layer.width}%`;
+    node.style.height = `${layer.height}%`;
+    node.style.background = `rgba(0, 0, 0, ${layer.opacity / 100})`;
+    node.style.backdropFilter = `blur(${layer.blur}px)`;
+    node.innerHTML = `<span>Lớp che ${index + 1}</span>`;
+    node.addEventListener('pointerdown', (event) => startMaskLayerDrag(layer.id, event));
+    el.subtitleMaskLayers.appendChild(node);
+  });
+}
+
+function renderMaskLayerList() {
+  if (!el.maskLayerList) return;
+  el.maskLayerList.innerHTML = '';
+  state.maskLayers.forEach((layer, index) => {
+    const row = document.createElement('div');
+    row.className = 'mask-layer-row';
+    row.innerHTML = `<strong>Lớp ${index + 1}</strong>
+      <div class="mask-layer-controls">
+        <label>Rộng <input data-key="width" type="number" min="5" max="100" value="${layer.width}">%</label>
+        <label>Cao <input data-key="height" type="number" min="5" max="100" value="${layer.height}">%</label>
+        <label>Tối <input data-key="opacity" type="number" min="0" max="90" value="${layer.opacity}">%</label>
+        <label>Mờ nền <input data-key="blur" type="number" min="0" max="30" value="${layer.blur}" title="Độ mờ nền">px</label>
+      </div>
+      <button type="button" class="mask-layer-delete" title="Xóa lớp che" ${state.maskLayers.length === 1 ? 'disabled' : ''}>×</button>`;
+    row.querySelectorAll('input').forEach((input) => input.addEventListener('input', () => {
+      const key = input.dataset.key;
+      layer[key] = Math.max(Number(input.min), Math.min(Number(input.max), Number(input.value) || 0));
+      layer.x = Math.min(layer.x, 100 - layer.width);
+      layer.y = Math.min(layer.y, 100 - layer.height);
+      state.activeMaskLayerId = layer.id;
+      syncLegacyPrimaryMaskState();
+      renderMaskLayersPreview();
+    }));
+    row.querySelector('.mask-layer-delete').addEventListener('click', () => removeMaskLayer(layer.id));
+    el.maskLayerList.appendChild(row);
+  });
+}
+
+let activeMaskDrag = null;
+
+function startMaskLayerDrag(maskId, event) {
+  const screen = document.querySelector('.screen');
+  const layer = state.maskLayers.find((item) => item.id === maskId);
+  if (!screen || !layer) return;
+  state.activeMaskLayerId = maskId;
+  activeMaskDrag = { maskId, startX: event.clientX, startY: event.clientY, x: layer.x, y: layer.y };
+  screen.setPointerCapture?.(event.pointerId);
+  event.preventDefault();
+}
+
+function setupDirectSubtitleEditor() {
+  const screen = document.querySelector('.screen');
+  if (!screen) return;
+  let dragMode = null;
+  let startY = 0;
+  let startValue = 0;
+  const startDrag = (mode, event) => {
+    if ((mode === 'caption' && !state.burnSubtitlesEnabled) || (mode === 'mask' && !state.subtitleOverlayEnabled)) return;
+    dragMode = mode;
+    startY = event.clientY;
+    startValue = state.subtitlePosition;
+    screen.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  };
+  el.captionBox?.addEventListener('pointerdown', (event) => startDrag('caption', event));
+  el.subtitleMaskResizeHandle?.addEventListener('pointerdown', (event) => startDrag('mask', event));
+  screen.addEventListener('pointermove', (event) => {
+    if (activeMaskDrag) {
+      const layer = state.maskLayers.find((item) => item.id === activeMaskDrag.maskId);
+      if (!layer) return;
+      layer.x = Math.round(Math.max(0, Math.min(100 - layer.width, activeMaskDrag.x + ((event.clientX - activeMaskDrag.startX) / Math.max(1, screen.clientWidth)) * 100)));
+      layer.y = Math.round(Math.max(0, Math.min(100 - layer.height, activeMaskDrag.y + ((event.clientY - activeMaskDrag.startY) / Math.max(1, screen.clientHeight)) * 100)));
+      renderMaskLayersPreview();
+      renderMaskLayerList();
+      return;
+    }
+    if (!dragMode) return;
+    const deltaPercent = ((startY - event.clientY) / Math.max(1, screen.clientHeight)) * 100;
+    const slider = el.subtitlePositionSlider;
+    if (!slider) return;
+    const value = Math.round(Math.max(Number(slider.min), Math.min(Number(slider.max), startValue + deltaPercent)));
+    slider.value = value;
+    updateSubtitleOutputUI();
+  });
+  const stopDrag = () => { dragMode = null; activeMaskDrag = null; };
+  screen.addEventListener('pointerup', stopDrag);
+  screen.addEventListener('pointercancel', stopDrag);
+}
+
 // --- Start Full Dubbing Process ---
 async function startDubbingProcess() {
   if (!state.videoPath || !state.srtDubPath) {
@@ -1361,6 +1596,16 @@ async function startDubbingProcess() {
     orig_volume: origVolVal,
     dub_volume: dubVolVal,
     num_workers: parseInt(el.threadsSlider.value, 10) || 50,
+    subtitle_overlay_enabled: state.subtitleOverlayEnabled,
+    burn_subtitles_enabled: state.burnSubtitlesEnabled,
+    subtitle_position_percent: state.subtitlePosition,
+    subtitle_mask_height_percent: state.maskHeight,
+    subtitle_mask_opacity: state.maskOpacity / 100,
+    subtitle_mask_blur: state.maskBlur,
+    subtitle_font_size: state.subtitleFontSize,
+    subtitle_color: state.subtitleColor,
+    subtitle_outline: state.subtitleOutline,
+    subtitle_masks: state.maskLayers.map(({ x, y, width, height, opacity, blur }) => ({ x, y, width, height, opacity: opacity / 100, blur })),
   };
 
 
